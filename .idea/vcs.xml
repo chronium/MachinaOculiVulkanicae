@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/openxr-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/openxrhpp-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/spdlog-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/x64-Debug/_deps/openxr-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/x64-Debug/_deps/openxrhpp-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/out/build/x64-Debug/_deps/spdlog-src" vcs="Git" />
+  </component>
+</project>
