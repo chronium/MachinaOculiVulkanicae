@@ -1,7 +1,12 @@
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan.hpp>
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+
+#pragma warning(push, 0)
+#include <openxr/openxr.hpp>
+#pragma warning(pop)
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -54,7 +59,6 @@ static const unsigned int patchVersion = 0;
 static const char *const layerNames[] = {"XR_APILAYER_LUNARG_core_validation"};
 static const char *const extensionNames[] = {
     "XR_KHR_vulkan_enable",
-    "XR_KHR_vulkan_enable2",
     "XR_EXT_debug_utils",
 };
 static const char *const vulkanLayerNames[] = {"VK_LAYER_KHRONOS_validation"};
@@ -64,7 +68,7 @@ static const size_t bufferSize = sizeof(float) * 4 * 4 * 3;
 
 static const size_t eyeCount = 2;
 
-static const float nearDistance = 0.01;
+static const float nearDistance = 0.01f;
 static const float farDistance = 1'000;
 
 static bool quit = false;
@@ -77,80 +81,65 @@ static XrVector3f objectPos = {0, 0, 0};
 void onInterrupt(int) { quit = true; }
 
 struct Swapchain {
-  Swapchain(XrSwapchain swapchain, VkFormat format, uint32_t width,
+  Swapchain(xr::Swapchain swapchain, vk::Format format, uint32_t width,
             uint32_t height)
       : swapchain(swapchain), format(format), width(width), height(height) {}
 
-  ~Swapchain() { xrDestroySwapchain(swapchain); }
+  ~Swapchain() { swapchain.destroy(); }
 
-  XrSwapchain swapchain;
-  VkFormat format;
+  xr::Swapchain swapchain;
+  vk::Format format;
   uint32_t width;
   uint32_t height;
 };
 
 struct SwapchainImage {
-  SwapchainImage(VkPhysicalDevice physicalDevice, VkDevice device,
-                 VkRenderPass renderPass, VkCommandPool commandPool,
-                 VkDescriptorPool descriptorPool,
-                 VkDescriptorSetLayout descriptorSetLayout,
-                 const Swapchain *swapchain, XrSwapchainImageVulkanKHR image)
-      : image(image), device(device), commandPool(commandPool),
-        descriptorPool(descriptorPool) {
-    VkImageViewCreateInfo imageViewCreateInfo{};
-    imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    imageViewCreateInfo.image = image.image;
-    imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    imageViewCreateInfo.format = swapchain->format;
-    imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
-    imageViewCreateInfo.subresourceRange.levelCount = 1;
-    imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
-    imageViewCreateInfo.subresourceRange.layerCount = 1;
+  SwapchainImage(vk::PhysicalDevice physical_device, vk::Device device,
+                 vk::RenderPass render_pass, vk::CommandPool command_pool,
+                 vk::DescriptorPool descriptor_pool,
+                 vk::DescriptorSetLayout descriptor_set_layout,
+                 const Swapchain *swapchain, xr::SwapchainImageVulkanKHR image)
+      : image(image), device(device), commandPool(command_pool),
+        descriptorPool(descriptor_pool) {
+    vk::ImageViewCreateInfo image_view_create_info{};
+    image_view_create_info.setImage(image.image)
+        .setViewType(vk::ImageViewType::e2D)
+        .setFormat(swapchain->format)
+        .setSubresourceRange(vk::ImageSubresourceRange()
+                                 .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                                 .setBaseMipLevel(0)
+                                 .setLevelCount(1)
+                                 .setBaseArrayLayer(0)
+                                 .setLayerCount(1));
 
-    if (const auto result = vkCreateImageView(device, &imageViewCreateInfo,
-                                              nullptr, &imageView);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to create Vulkan image view: {}", result);
-    }
+    imageView = device.createImageView(image_view_create_info);
 
-    VkFramebufferCreateInfo framebufferCreateInfo{};
-    framebufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebufferCreateInfo.renderPass = renderPass;
-    framebufferCreateInfo.attachmentCount = 1;
-    framebufferCreateInfo.pAttachments = &imageView;
-    framebufferCreateInfo.width = swapchain->width;
-    framebufferCreateInfo.height = swapchain->height;
-    framebufferCreateInfo.layers = 1;
+    vk::FramebufferCreateInfo framebuffer_create_info{};
+    framebuffer_create_info.setRenderPass(render_pass)
+        .setAttachments(imageView)
+        .setWidth(swapchain->width)
+        .setHeight(swapchain->height)
+        .setLayers(1);
 
-    if (const auto result = vkCreateFramebuffer(device, &framebufferCreateInfo,
-                                                nullptr, &framebuffer);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to create Vulkan framebuffer: {}", result);
-    }
+    framebuffer = device.createFramebuffer(framebuffer_create_info);
 
-    VkBufferCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    createInfo.size = bufferSize;
-    createInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vk::BufferCreateInfo create_info{};
+    create_info.setSize(bufferSize)
+        .setUsage(vk::BufferUsageFlagBits::eUniformBuffer)
+        .setSharingMode(vk::SharingMode::eExclusive);
 
-    if (const auto result =
-            vkCreateBuffer(device, &createInfo, nullptr, &buffer);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to create Vulkan buffer: {}", result);
-    }
+    buffer = device.createBuffer(create_info);
 
-    VkMemoryRequirements requirements;
-    vkGetBufferMemoryRequirements(device, buffer, &requirements);
+    vk::MemoryRequirements requirements =
+        device.getBufferMemoryRequirements(buffer);
 
-    VkMemoryPropertyFlags flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vk::MemoryPropertyFlags flags = vk::MemoryPropertyFlagBits::eHostVisible |
+                                    vk::MemoryPropertyFlagBits::eHostCoherent;
 
-    VkPhysicalDeviceMemoryProperties properties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &properties);
+    vk::PhysicalDeviceMemoryProperties properties =
+        physical_device.getMemoryProperties();
 
-    uint32_t memoryTypeIndex = 0;
+    uint32_t memory_type_index = 0;
 
     for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
       if (!(requirements.memoryTypeBits & (1 << i))) {
@@ -161,117 +150,86 @@ struct SwapchainImage {
         continue;
       }
 
-      memoryTypeIndex = i;
+      memory_type_index = i;
       break;
     }
 
     VkMemoryAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocateInfo.allocationSize = requirements.size;
-    allocateInfo.memoryTypeIndex = memoryTypeIndex;
+    allocateInfo.memoryTypeIndex = memory_type_index;
 
-    if (const auto result =
-            vkAllocateMemory(device, &allocateInfo, nullptr, &memory);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to allocate Vulkan memory: {}", result);
-    }
+    vk::MemoryAllocateInfo allocate_info{};
+    allocate_info.setAllocationSize(requirements.size)
+        .setMemoryTypeIndex(memory_type_index);
 
-    vkBindBufferMemory(device, buffer, memory, 0);
+    memory = device.allocateMemory(allocate_info);
 
-    VkCommandBufferAllocateInfo commandBufferAllocateInfo{};
-    commandBufferAllocateInfo.sType =
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    commandBufferAllocateInfo.commandPool = commandPool;
-    commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocateInfo.commandBufferCount = 1;
+    device.bindBufferMemory(buffer, memory, 0);
 
-    if (const auto result = vkAllocateCommandBuffers(
-            device, &commandBufferAllocateInfo, &commandBuffer);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to allocate Vulkan command buffers: {}", result);
-    }
+    vk::CommandBufferAllocateInfo command_buffer_allocate_info{};
+    command_buffer_allocate_info.setCommandPool(command_pool)
+        .setLevel(vk::CommandBufferLevel::ePrimary)
+        .setCommandBufferCount(1);
 
-    VkDescriptorSetAllocateInfo descriptorSetAllocateInfo{};
-    descriptorSetAllocateInfo.sType =
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    descriptorSetAllocateInfo.descriptorPool = descriptorPool;
-    descriptorSetAllocateInfo.descriptorSetCount = 1;
-    descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
+    commandBuffer =
+        device.allocateCommandBuffers(command_buffer_allocate_info)[0];
 
-    if (const auto result = vkAllocateDescriptorSets(
-            device, &descriptorSetAllocateInfo, &descriptorSet);
-        result != VK_SUCCESS) {
-      spdlog::error("Failed to allocate Vulkan descriptor set: {}", result);
-    }
+    vk::DescriptorSetAllocateInfo descriptor_set_allocate_info{};
+    descriptor_set_allocate_info.setDescriptorPool(descriptor_pool)
+        .setSetLayouts(descriptor_set_layout);
 
-    VkDescriptorBufferInfo descriptorBufferInfo{};
-    descriptorBufferInfo.buffer = buffer;
-    descriptorBufferInfo.offset = 0;
-    descriptorBufferInfo.range = VK_WHOLE_SIZE;
+    descriptorSet =
+        device.allocateDescriptorSets(descriptor_set_allocate_info)[0];
 
-    VkWriteDescriptorSet descriptorWrite{};
-    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrite.dstSet = descriptorSet;
-    descriptorWrite.dstBinding = 0;
-    descriptorWrite.dstArrayElement = 0;
-    descriptorWrite.descriptorCount = 1;
-    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    descriptorWrite.pBufferInfo = &descriptorBufferInfo;
+    vk::DescriptorBufferInfo descriptor_buffer_info{};
+    descriptor_buffer_info.setBuffer(buffer).setOffset(0).setRange(~0);
 
-    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+    vk::WriteDescriptorSet descriptor_write{};
+    descriptor_write.setDstSet(descriptorSet)
+        .setDstBinding(0)
+        .setDstArrayElement(0)
+        .setDescriptorCount(1)
+        .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+        .setPBufferInfo(&descriptor_buffer_info);
+
+    device.updateDescriptorSets(1, &descriptor_write, 0, nullptr);
   }
 
   ~SwapchainImage() {
-    vkFreeDescriptorSets(device, descriptorPool, 1, &descriptorSet);
-    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-    vkDestroyBuffer(device, buffer, nullptr);
-    vkFreeMemory(device, memory, nullptr);
-    vkDestroyFramebuffer(device, framebuffer, nullptr);
-    vkDestroyImageView(device, imageView, nullptr);
+    device.freeDescriptorSets(descriptorPool, 1, &descriptorSet);
+    device.freeCommandBuffers(commandPool, 1, &commandBuffer);
+    device.destroyBuffer(buffer);
+    device.freeMemory(memory);
+    device.destroyFramebuffer(framebuffer);
+    device.destroyImageView(imageView);
   }
 
-  XrSwapchainImageVulkanKHR image;
-  VkImageView imageView;
-  VkFramebuffer framebuffer;
-  VkDeviceMemory memory;
-  VkBuffer buffer;
-  VkCommandBuffer commandBuffer;
-  VkDescriptorSet descriptorSet;
+  xr::SwapchainImageVulkanKHR image;
+  vk::ImageView imageView;
+  vk::Framebuffer framebuffer;
+  vk::DeviceMemory memory;
+  vk::Buffer buffer;
+  vk::CommandBuffer commandBuffer;
+  vk::DescriptorSet descriptorSet;
 
 private:
-  VkDevice device;
-  VkCommandPool commandPool;
-  VkDescriptorPool descriptorPool;
+  vk::Device device;
+  vk::CommandPool commandPool;
+  vk::DescriptorPool descriptorPool;
 };
 
-XrInstance createInstance() {
-  XrInstance instance;
-
-  XrInstanceCreateInfo instanceCreateInfo{};
-  instanceCreateInfo.type = XR_TYPE_INSTANCE_CREATE_INFO;
-  instanceCreateInfo.createFlags = 0;
-  strncpy_s(instanceCreateInfo.applicationInfo.applicationName, applicationName,
-            strlen(applicationName));
-  instanceCreateInfo.applicationInfo.applicationVersion =
-      XR_MAKE_VERSION(majorVersion, minorVersion, patchVersion);
-  strncpy_s(instanceCreateInfo.applicationInfo.engineName, applicationName,
-            strlen(applicationName));
-  instanceCreateInfo.applicationInfo.engineVersion =
-      XR_MAKE_VERSION(majorVersion, minorVersion, patchVersion);
-  instanceCreateInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-  instanceCreateInfo.enabledApiLayerCount = 1;
-  instanceCreateInfo.enabledApiLayerNames = layerNames;
-  instanceCreateInfo.enabledExtensionCount =
-      sizeof(extensionNames) / sizeof(const char *);
-  instanceCreateInfo.enabledExtensionNames = extensionNames;
-
-  if (const auto result = xrCreateInstance(&instanceCreateInfo, &instance);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create OpenXR instance: {}", result);
-    return XR_NULL_HANDLE;
-  }
-
-  return instance;
+auto create_instance() -> xr::Instance {
+  return xr::createInstance(
+      {xr::InstanceCreateFlags(),
+       xr::ApplicationInfo{applicationName,
+                           static_cast<uint32_t>(XR_MAKE_VERSION(
+                               majorVersion, minorVersion, patchVersion)),
+                           applicationName,
+                           static_cast<uint32_t>(XR_MAKE_VERSION(
+                               majorVersion, minorVersion, patchVersion)),
+                           xr::Version::current()},
+       1, layerNames, _countof(extensionNames), extensionNames});
 }
 
 PFN_vkVoidFunction getVKFunction(VkInstance instance, const char *name) {
@@ -298,1276 +256,736 @@ PFN_xrVoidFunction getXRFunction(XrInstance instance, const char *name) {
   return func;
 }
 
-XrBool32 handleXRError(XrDebugUtilsMessageSeverityFlagsEXT severity,
-                       XrDebugUtilsMessageTypeFlagsEXT type,
-                       const XrDebugUtilsMessengerCallbackDataEXT *callbackData,
-                       void *userData) {
-  const auto messageType =
+auto handle_xr_error(const XrDebugUtilsMessageSeverityFlagsEXT severity,
+                     const XrDebugUtilsMessageTypeFlagsEXT type,
+                     const XrDebugUtilsMessengerCallbackDataEXT *callback_data,
+                     [[maybe_unused]] void *user_data) -> XrBool32 {
+  const auto message_type =
       xrMessageTypeMap.contains(type) ? xrMessageTypeMap.at(type) : "Unknown";
-  const auto messageSeverity = xrMessageSeverityMap.contains(severity)
-                                   ? xrMessageSeverityMap.at(severity)
-                                   : spdlog::level::err;
+  const auto message_severity = xrMessageSeverityMap.contains(severity)
+                                    ? xrMessageSeverityMap.at(severity)
+                                    : spdlog::level::err;
 
-  spdlog::log(messageSeverity, "OpenXR {}: {}", messageType,
-              callbackData->message);
-
-  return XR_FALSE;
-}
-
-XrDebugUtilsMessengerEXT createDebugMessenger(XrInstance instance) {
-  XrDebugUtilsMessengerEXT debugMessenger;
-
-  XrDebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo{};
-  debugMessengerCreateInfo.type = XR_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-  debugMessengerCreateInfo.messageSeverities =
-      XR_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-      XR_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-      XR_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-  debugMessengerCreateInfo.messageTypes =
-      XR_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-      XR_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-      XR_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT |
-      XR_DEBUG_UTILS_MESSAGE_TYPE_CONFORMANCE_BIT_EXT;
-  debugMessengerCreateInfo.userCallback = handleXRError;
-  debugMessengerCreateInfo.userData = nullptr;
-
-  auto xrCreateDebugUtilsMessengerEXT =
-      reinterpret_cast<PFN_xrCreateDebugUtilsMessengerEXT>(
-          getXRFunction(instance, "xrCreateDebugUtilsMessengerEXT"));
-
-  if (const auto result = xrCreateDebugUtilsMessengerEXT(
-          instance, &debugMessengerCreateInfo, &debugMessenger);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create OpenXR debug messenger: {}", result);
-    return XR_NULL_HANDLE;
-  }
-
-  return debugMessenger;
-}
-
-XrSystemId getSystem(XrInstance instance) {
-  XrSystemId systemId;
-
-  XrSystemGetInfo systemGetInfo{};
-  systemGetInfo.type = XR_TYPE_SYSTEM_GET_INFO;
-  systemGetInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-
-  if (const auto result = xrGetSystem(instance, &systemGetInfo, &systemId);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to get system: {}", result);
-    return XR_NULL_SYSTEM_ID;
-  }
-
-  return systemId;
-}
-
-void destroyDebugMessenger(XrInstance instance,
-                           XrDebugUtilsMessengerEXT debugMessenger) {
-  auto xrDestroyDebugUtilsMessengerEXT =
-      reinterpret_cast<PFN_xrDestroyDebugUtilsMessengerEXT>(
-          getXRFunction(instance, "xrDestroyDebugUtilsMessengerEXT"));
-
-  xrDestroyDebugUtilsMessengerEXT(debugMessenger);
-}
-
-std::tuple<XrGraphicsRequirementsVulkan2KHR, std::set<std::string>>
-getVulkanInstanceRequirements(XrInstance instance, XrSystemId system) {
-  auto xrGetVulkanGraphicsRequirements2KHR =
-      reinterpret_cast<PFN_xrGetVulkanGraphicsRequirements2KHR>(
-          getXRFunction(instance, "xrGetVulkanGraphicsRequirements2KHR"));
-  auto xrGetVulkanInstanceExtensionsKHR =
-      reinterpret_cast<PFN_xrGetVulkanInstanceExtensionsKHR>(
-          getXRFunction(instance, "xrGetVulkanInstanceExtensionsKHR"));
-
-  XrGraphicsRequirementsVulkan2KHR graphicsRequirements{};
-  graphicsRequirements.type = XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR;
-
-  auto result = xrGetVulkanGraphicsRequirements2KHR(instance, system,
-                                                    &graphicsRequirements);
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan graphics requirements: {}", result);
-    return {graphicsRequirements, {}};
-  }
-
-  uint32_t instanceExtensionsSize;
-
-  result = xrGetVulkanInstanceExtensionsKHR(instance, system, 0,
-                                            &instanceExtensionsSize, nullptr);
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan instance extensions: {}", result);
-    return {graphicsRequirements, {}};
-  }
-
-  auto instanceExtensionsData = new char[instanceExtensionsSize];
-
-  result = xrGetVulkanInstanceExtensionsKHR(
-      instance, system, instanceExtensionsSize, &instanceExtensionsSize,
-      instanceExtensionsData);
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan instance extensions: {}", result);
-    return {graphicsRequirements, {}};
-  }
-
-  std::set<std::string> instanceExtensions;
-
-  uint32_t last = 0;
-  for (uint32_t i = 0; i <= instanceExtensionsSize; i++) {
-    if (i == instanceExtensionsSize || instanceExtensionsData[i] == ' ') {
-      instanceExtensions.insert(
-          std::string(instanceExtensionsData + last, i - last));
-      last = i + 1;
-    }
-  }
-
-  delete[] instanceExtensionsData;
-
-  return {graphicsRequirements, instanceExtensions};
-}
-
-std::tuple<VkPhysicalDevice, std::set<std::string>>
-getVulkanDeviceRequirements(XrInstance instance, XrSystemId system,
-                            VkInstance vulkanInstance) {
-  auto xrGetVulkanGraphicsDevice2KHR =
-      reinterpret_cast<PFN_xrGetVulkanGraphicsDevice2KHR>(
-          getXRFunction(instance, "xrGetVulkanGraphicsDevice2KHR"));
-  auto xrGetVulkanDeviceExtensionsKHR =
-      reinterpret_cast<PFN_xrGetVulkanDeviceExtensionsKHR>(
-          getXRFunction(instance, "xrGetVulkanDeviceExtensionsKHR"));
-
-  VkPhysicalDevice physicalDevice;
-
-  XrVulkanGraphicsDeviceGetInfoKHR deviceGetInfo{
-      XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR};
-  deviceGetInfo.systemId = system;
-  deviceGetInfo.vulkanInstance = vulkanInstance;
-
-  auto result =
-      xrGetVulkanGraphicsDevice2KHR(instance, &deviceGetInfo, &physicalDevice);
-
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan graphics device: {}", result);
-    return {VK_NULL_HANDLE, {}};
-  }
-
-  uint32_t deviceExtensionsSize;
-
-  result = xrGetVulkanDeviceExtensionsKHR(instance, system, 0,
-                                          &deviceExtensionsSize, nullptr);
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan device extensions: {}", result);
-    return {VK_NULL_HANDLE, {}};
-  }
-
-  auto deviceExtensionsData = new char[deviceExtensionsSize];
-
-  result = xrGetVulkanDeviceExtensionsKHR(
-      instance, system, deviceExtensionsSize, &deviceExtensionsSize,
-      deviceExtensionsData);
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get Vulkan device extensions: {}", result);
-    return {VK_NULL_HANDLE, {}};
-  }
-
-  std::set<std::string> deviceExtensions;
-
-  uint32_t last = 0;
-  for (uint32_t i = 0; i <= deviceExtensionsSize; i++) {
-    if (i == deviceExtensionsSize || deviceExtensionsData[i] == ' ') {
-      deviceExtensions.insert(
-          std::string(deviceExtensionsData + last, i - last));
-      last = i + 1;
-    }
-  }
-
-  delete[] deviceExtensionsData;
-
-  return {physicalDevice, deviceExtensions};
-}
-
-VkInstance
-createVulkanInstance(XrGraphicsRequirementsVulkanKHR graphicsRequirements,
-                     std::set<std::string> instanceExtensions) {
-  VkInstance instance;
-
-  size_t extensionCount = 1 + instanceExtensions.size();
-  auto extensionNames = new const char *[extensionCount];
-
-  size_t i = 0;
-  extensionNames[i] = vulkanExtensionNames[0];
-  i++;
-
-  for (auto &instanceExtension : instanceExtensions) {
-    extensionNames[i] = instanceExtension.c_str();
-    i++;
-  }
-
-  VkApplicationInfo applicationInfo{};
-  applicationInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-  applicationInfo.pApplicationName = applicationName;
-  applicationInfo.applicationVersion =
-      VK_MAKE_VERSION(majorVersion, minorVersion, patchVersion);
-  applicationInfo.pEngineName = applicationName;
-  applicationInfo.engineVersion =
-      VK_MAKE_VERSION(majorVersion, minorVersion, patchVersion);
-  applicationInfo.apiVersion = graphicsRequirements.minApiVersionSupported;
-
-  VkInstanceCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  createInfo.pApplicationInfo = &applicationInfo;
-  createInfo.enabledExtensionCount = extensionCount;
-  createInfo.ppEnabledExtensionNames = extensionNames;
-  createInfo.enabledLayerCount = 1;
-  createInfo.ppEnabledLayerNames = vulkanLayerNames;
-
-  auto result = vkCreateInstance(&createInfo, nullptr, &instance);
-
-  delete[] extensionNames;
-
-  if (result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan instance: {}", result);
-    return VK_NULL_HANDLE;
-  }
-
-  return instance;
-}
-
-XrBool32 handleVKError(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-                       VkDebugUtilsMessageTypeFlagsEXT type,
-                       const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
-                       void *userData) {
-  const auto messageType =
-      vkMessageTypeMap.contains(type) ? vkMessageTypeMap.at(type) : "Unknown";
-  const auto messageSeverity = vkMessageSeverityMap.contains(severity)
-                                   ? vkMessageSeverityMap.at(severity)
-                                   : spdlog::level::err;
-
-  spdlog::log(messageSeverity, "OpenXR {}: {}", messageType,
-              callbackData->pMessage);
+  spdlog::log(message_severity, "OpenXR {}: {}", message_type,
+              callback_data->message);
 
   return XR_FALSE;
 }
 
-VkDebugUtilsMessengerEXT createVulkanDebugMessenger(VkInstance instance) {
-  VkDebugUtilsMessengerEXT debugMessenger;
+auto create_debug_messenger(const xr::Instance instance)
+    -> xr::DebugUtilsMessengerEXT {
+  return instance.createDebugUtilsMessengerEXT(
+      {xr::DebugUtilsMessageSeverityFlagBitsEXT::AllBits,
+       xr::DebugUtilsMessageTypeFlagBitsEXT::AllBits, handle_xr_error, nullptr},
+      xr::DispatchLoaderDynamic(instance));
+}
 
-  VkDebugUtilsMessengerCreateInfoEXT debugMessengerCreateInfo{};
-  debugMessengerCreateInfo.sType =
-      VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-  debugMessengerCreateInfo.messageSeverity =
-      VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-      VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-      VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-  debugMessengerCreateInfo.messageType =
-      VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-      VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-      VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-  debugMessengerCreateInfo.pfnUserCallback = handleVKError;
+auto get_system(const xr::Instance instance) -> xr::SystemId {
+  const xr::SystemGetInfo system_get_info{xr::FormFactor::HeadMountedDisplay};
 
-  auto vkCreateDebugUtilsMessengerEXT =
+  return instance.getSystem(system_get_info);
+}
+
+auto get_vulkan_instance_requirements(const xr::Instance instance,
+                                      const xr::SystemId system)
+    -> std::tuple<xr::GraphicsRequirementsVulkanKHR, std::set<std::string>> {
+  std::set<std::string> extensions;
+
+  const auto graphics_requirements = instance.getVulkanGraphicsRequirementsKHR(
+      system, xr::DispatchLoaderDynamic(instance));
+
+  const auto extensions_raw = instance.getVulkanInstanceExtensionsKHR(
+      system, xr::DispatchLoaderDynamic(instance));
+  std::istringstream iss(extensions_raw);
+
+  std::string extension;
+  while (iss >> extension)
+    extensions.insert(extension);
+
+  return {graphics_requirements, extensions};
+}
+
+auto get_vulkan_device_requirements(const xr::Instance instance,
+                                    const xr::SystemId system,
+                                    const VkInstance vulkan_instance)
+    -> std::tuple<VkPhysicalDevice, std::set<std::string>> {
+  VkPhysicalDevice physical_device;
+
+  if (const auto result = instance.getVulkanGraphicsDeviceKHR(
+          system, vulkan_instance, &physical_device,
+          xr::DispatchLoaderDynamic(instance));
+      result != xr::Result::Success) {
+    spdlog::error("Failed to get Vulkan graphics device: {}",
+                  xr::to_string_literal(result));
+    return {VK_NULL_HANDLE, {}};
+  }
+
+  const auto extensions_raw = instance.getVulkanDeviceExtensionsKHR(
+      system, xr::DispatchLoaderDynamic(instance));
+  std::istringstream iss(extensions_raw);
+  std::set<std::string> device_extensions;
+
+  std::string extension;
+  while (iss >> extension)
+    device_extensions.insert(extension);
+
+  return {physical_device, device_extensions};
+}
+
+auto create_vulkan_instance(
+    const xr::GraphicsRequirementsVulkanKHR graphics_requirements,
+    const std::set<std::string> &instance_extensions) -> vk::Instance {
+  std::vector<const char *> extensions;
+  extensions.reserve(instance_extensions.size());
+  std::ranges::transform(instance_extensions, std::back_inserter(extensions),
+                         [](const auto &str) { return str.c_str(); });
+
+  for (const auto &extension : vulkanExtensionNames)
+    extensions.push_back(extension);
+
+  const vk::ApplicationInfo application_info{
+      applicationName,
+      VK_MAKE_VERSION(majorVersion, minorVersion, patchVersion),
+      applicationName,
+      VK_MAKE_VERSION(majorVersion, minorVersion, patchVersion),
+      static_cast<uint32_t>(
+          graphics_requirements.minApiVersionSupported.get())};
+
+  const vk::InstanceCreateInfo create_info{vk::InstanceCreateFlags{},
+                                           &application_info, vulkanLayerNames,
+                                           extensions};
+
+  return vk::createInstance(create_info);
+}
+
+XrBool32
+handle_vk_error(const VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                const VkDebugUtilsMessageTypeFlagsEXT type,
+                const VkDebugUtilsMessengerCallbackDataEXT *callback_data,
+                void *userData) {
+  const auto message_severity = vkMessageSeverityMap.contains(severity)
+                                    ? vkMessageSeverityMap.at(severity)
+                                    : spdlog::level::err;
+
+  if (strcmp(callback_data->pMessageIdName,
+             "UNASSIGNED-CoreValidation-DrawState-InvalidImageLayout"))
+    spdlog::log(
+        message_severity, "Vulkan {}: {}",
+        vk::to_string(static_cast<vk::DebugUtilsMessageTypeFlagsEXT>(type)),
+        callback_data->pMessage);
+
+  return XR_FALSE;
+}
+
+// ReSharper disable CppInconsistentNaming
+PFN_vkCreateDebugUtilsMessengerEXT pfnVkCreateDebugUtilsMessengerEXT;
+PFN_vkDestroyDebugUtilsMessengerEXT pfnVkDestroyDebugUtilsMessengerEXT;
+
+// ReSharper disable CppParameterMayBeConst
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
+    VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDebugUtilsMessengerEXT *pMessenger) {
+  return pfnVkCreateDebugUtilsMessengerEXT(instance, pCreateInfo, pAllocator,
+                                           pMessenger);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
+    VkInstance instance, VkDebugUtilsMessengerEXT messenger,
+    VkAllocationCallbacks const *pAllocator) {
+  return pfnVkDestroyDebugUtilsMessengerEXT(instance, messenger, pAllocator);
+}
+// ReSharper restore CppParameterMayBeConst
+// ReSharper restore CppInconsistentNaming
+
+auto create_vulkan_debug_messenger(const vk::Instance instance)
+    -> vk::DebugUtilsMessengerEXT {
+  vk::DebugUtilsMessageSeverityFlagsEXT severity_flags{
+      vk::DebugUtilsMessageSeverityFlagBitsEXT::eError |
+      vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo |
+      vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning |
+      vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose};
+
+  vk::DebugUtilsMessageTypeFlagsEXT message_types{
+      vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral |
+      vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance |
+      vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation};
+
+  pfnVkCreateDebugUtilsMessengerEXT =
       reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
-          getVKFunction(instance, "vkCreateDebugUtilsMessengerEXT"));
+          instance.getProcAddr("vkCreateDebugUtilsMessengerEXT"));
 
-  if (const auto result = vkCreateDebugUtilsMessengerEXT(
-          instance, &debugMessengerCreateInfo, nullptr, &debugMessenger);
-      result != VK_SUCCESS) {
-    std::cerr << "Failed to create Vulkan debug messenger: " << result
-              << std::endl;
-    return VK_NULL_HANDLE;
-  }
+  const auto result = instance.createDebugUtilsMessengerEXT(
+      {{}, severity_flags, message_types, handle_vk_error});
 
-  return debugMessenger;
+  return result;
 }
 
-void destroyVulkanDebugMessenger(VkInstance instance,
-                                 VkDebugUtilsMessengerEXT debugMessenger) {
-  auto vkDestroyDebugUtilsMessengerEXT =
+auto destroy_vulkan_debug_messenger(
+    const vk::Instance instance,
+    const vk::DebugUtilsMessengerEXT debug_messenger) -> void {
+  pfnVkDestroyDebugUtilsMessengerEXT =
       reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
-          getVKFunction(instance, "vkDestroyDebugUtilsMessengerEXT"));
+          instance.getProcAddr("vkDestroyDebugUtilsMessengerEXT"));
 
-  vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+  instance.destroyDebugUtilsMessengerEXT(debug_messenger);
 }
 
-void destroyVulkanInstance(VkInstance instance) {
-  vkDestroyInstance(instance, nullptr);
-}
+auto get_device_queue_family(const vk::PhysicalDevice physical_device)
+    -> uint32_t {
+  uint32_t graphics_queue_family_index = -1;
 
-int32_t getDeviceQueueFamily(VkPhysicalDevice physicalDevice) {
-  int32_t graphicsQueueFamilyIndex = -1;
+  const std::vector<vk::QueueFamilyProperties> queue_families =
+      physical_device.getQueueFamilyProperties();
 
-  uint32_t queueFamilyCount;
-  vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount,
-                                           nullptr);
-
-  std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-  vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount,
-                                           queueFamilies.data());
-
-  for (int32_t i = 0; i < queueFamilyCount; i++) {
-    if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-      graphicsQueueFamilyIndex = i;
+  for (uint32_t i = 0; i < queue_families.size(); i++) {
+    if (queue_families[i].queueFlags & vk::QueueFlagBits::eGraphics) {
+      graphics_queue_family_index = i;
       break;
     }
   }
 
-  if (graphicsQueueFamilyIndex == -1) {
+  if (graphics_queue_family_index == -1) {
     spdlog::error("No graphics queue found.");
-    return graphicsQueueFamilyIndex;
+    return graphics_queue_family_index;
   }
 
-  return graphicsQueueFamilyIndex;
+  return graphics_queue_family_index;
 }
 
-std::tuple<VkDevice, VkQueue>
-createDevice(VkPhysicalDevice physicalDevice, int32_t graphicsQueueFamilyIndex,
-             std::set<std::string> deviceExtensions) {
-  VkDevice device;
-
-  size_t extensionCount = deviceExtensions.size();
-  auto extensions = new const char *[extensionCount];
-
-  size_t i = 0;
-  for (const auto &deviceExtension : deviceExtensions) {
-    extensions[i] = deviceExtension.c_str();
-    i++;
-  }
+auto create_device(const vk::PhysicalDevice physical_device,
+                   const uint32_t graphics_queue_family_index,
+                   const std::set<std::string> &device_extensions)
+    -> std::tuple<vk::Device, vk::Queue> {
+  std::vector<const char *> extensions;
+  extensions.reserve(device_extensions.size());
+  std::ranges::transform(device_extensions, std::back_inserter(extensions),
+                         [](const auto &str) { return str.c_str(); });
 
   float priority = 1;
 
-  VkDeviceQueueCreateInfo queueCreateInfo{};
-  queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-  queueCreateInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
-  queueCreateInfo.queueCount = 1;
-  queueCreateInfo.pQueuePriorities = &priority;
+  vk::DeviceQueueCreateInfo queue_create_info{
+      vk::DeviceQueueCreateFlags{}, graphics_queue_family_index, 1, &priority};
 
-  VkDeviceCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-  createInfo.queueCreateInfoCount = 1;
-  createInfo.pQueueCreateInfos = &queueCreateInfo;
-  createInfo.enabledExtensionCount = extensionCount;
-  createInfo.ppEnabledExtensionNames = extensions;
+  vk::DeviceCreateInfo create_info{};
+  create_info.setQueueCreateInfos(queue_create_info)
+      .setPEnabledExtensionNames(extensions);
 
-  auto result = vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
+  auto device = physical_device.createDevice(create_info);
 
-  delete[] extensions;
-
-  if (result != VK_SUCCESS) {
-    spdlog::error("Failed to create vulkan device: {}", result);
-    return {VK_NULL_HANDLE, VK_NULL_HANDLE};
-  }
-
-  VkQueue queue;
-  vkGetDeviceQueue(device, graphicsQueueFamilyIndex, 0, &queue);
+  auto queue = device.getQueue(graphics_queue_family_index, 0);
 
   return {device, queue};
 }
 
-void destroyDevice(VkDevice device) { vkDestroyDevice(device, nullptr); }
+auto create_render_pass(const vk::Device device) -> vk::RenderPass {
+  vk::AttachmentDescription attachment{};
+  attachment.setFormat(vk::Format::eR8G8B8A8Srgb)
+      .setSamples(vk::SampleCountFlagBits::e1)
+      .setLoadOp(vk::AttachmentLoadOp::eClear)
+      .setStoreOp(vk::AttachmentStoreOp::eStore)
+      .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+      .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+      .setInitialLayout(vk::ImageLayout::eUndefined)
+      .setFinalLayout(vk::ImageLayout::eColorAttachmentOptimal);
 
-VkRenderPass createRenderPass(VkDevice device) {
-  VkRenderPass renderPass;
+  vk::AttachmentReference attachment_ref{};
+  attachment_ref.setAttachment(0).setLayout(
+      vk::ImageLayout::eColorAttachmentOptimal);
 
-  VkAttachmentDescription attachment{};
-  attachment.format = VK_FORMAT_R8G8B8A8_SRGB;
-  attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-  attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-  attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-  attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  vk::SubpassDescription subpass{};
+  subpass.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+      .setColorAttachments(attachment_ref);
 
-  VkAttachmentReference attachmentRef{};
-  attachmentRef.attachment = 0;
-  attachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  vk::RenderPassCreateInfo create_info{};
+  create_info.setAttachments(attachment).setSubpasses(subpass);
 
-  VkSubpassDescription subpass{};
-  subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-  subpass.colorAttachmentCount = 1;
-  subpass.pColorAttachments = &attachmentRef;
-
-  VkRenderPassCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-  createInfo.flags = 0;
-  createInfo.attachmentCount = 1;
-  createInfo.pAttachments = &attachment;
-  createInfo.subpassCount = 1;
-  createInfo.pSubpasses = &subpass;
-
-  if (const auto result =
-          vkCreateRenderPass(device, &createInfo, nullptr, &renderPass);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan render pass: {}", result);
-    return VK_NULL_HANDLE;
-  }
-
-  return renderPass;
+  return device.createRenderPass(create_info, nullptr);
 }
 
-void destroyRenderPass(VkDevice device, VkRenderPass renderPass) {
-  vkDestroyRenderPass(device, renderPass, nullptr);
+auto create_command_pool(const vk::Device device,
+                         const uint32_t graphics_queue_family_index)
+    -> vk::CommandPool {
+  return device.createCommandPool(
+      {vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+       graphics_queue_family_index});
 }
 
-VkCommandPool createCommandPool(VkDevice device,
-                                int32_t graphicsQueueFamilyIndex) {
-  VkCommandPool commandPool;
+vk::DescriptorPool create_descriptor_pool(const vk::Device device) {
+  vk::DescriptorPoolSize pool_size{};
+  pool_size.setType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(32);
 
-  VkCommandPoolCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-  createInfo.queueFamilyIndex = graphicsQueueFamilyIndex;
-  createInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  vk::DescriptorPoolCreateInfo create_info{};
+  create_info.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet)
+      .setMaxSets(32)
+      .setPoolSizes(pool_size);
 
-  if (const auto result =
-          vkCreateCommandPool(device, &createInfo, nullptr, &commandPool);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan command pool: {}", result);
-    return VK_NULL_HANDLE;
-  }
-
-  return commandPool;
+  return device.createDescriptorPool(create_info);
 }
 
-void destroyCommandPool(VkDevice device, VkCommandPool commandPool) {
-  vkDestroyCommandPool(device, commandPool, nullptr);
+vk::DescriptorSetLayout create_descriptor_set_layout(const vk::Device device) {
+  vk::DescriptorSetLayoutBinding binding{};
+  binding.setBinding(0)
+      .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+      .setDescriptorCount(1)
+      .setStageFlags(vk::ShaderStageFlagBits::eVertex);
+
+  vk::DescriptorSetLayoutCreateInfo create_info{};
+  create_info.setBindings(binding);
+
+  return device.createDescriptorSetLayout(create_info);
 }
 
-VkDescriptorPool createDescriptorPool(VkDevice device) {
-  VkDescriptorPool descriptorPool;
+auto create_shader(const vk::Device device, const std::string &path)
+    -> vk::ShaderModule {
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  const std::streamsize file_size = file.tellg();
+  file.seekg(0, std::ios::beg);
 
-  VkDescriptorPoolSize poolSize{};
-  poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  poolSize.descriptorCount = 32;
+  std::vector<uint32_t> bytes(file_size);
+  file.read(reinterpret_cast<char *>(bytes.data()), file_size);
 
-  VkDescriptorPoolCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-  createInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  createInfo.maxSets = 32;
-  createInfo.poolSizeCount = 1;
-  createInfo.pPoolSizes = &poolSize;
+  vk::ShaderModuleCreateInfo create_info{};
+  create_info.setCode(bytes).setCodeSize(file_size);
 
-  if (const auto result =
-          vkCreateDescriptorPool(device, &createInfo, nullptr, &descriptorPool);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan descriptor pool: {}", result);
-    return VK_NULL_HANDLE;
-  }
-
-  return descriptorPool;
+  return device.createShaderModule(create_info);
 }
 
-void destroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool) {
-  vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-}
+auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
+                     vk::DescriptorSetLayout descriptor_set_layout,
+                     vk::ShaderModule vertex_shader,
+                     vk::ShaderModule fragment_shader)
+    -> std::tuple<vk::PipelineLayout, vk::Pipeline> {
+  vk::PipelineLayoutCreateInfo layout_create_info{};
+  layout_create_info.setSetLayouts(descriptor_set_layout);
 
-VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device) {
-  VkDescriptorSetLayout descriptorSetLayout;
+  auto pipeline_layout = device.createPipelineLayout(layout_create_info);
 
-  VkDescriptorSetLayoutBinding binding{};
-  binding.binding = 0;
-  binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  binding.descriptorCount = 1;
-  binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  vk::PipelineVertexInputStateCreateInfo vertex_input_stage{};
+  vertex_input_stage.setVertexBindingDescriptions({})
+      .setVertexAttributeDescriptions({});
 
-  VkDescriptorSetLayoutCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  createInfo.bindingCount = 1;
-  createInfo.pBindings = &binding;
+  vk::PipelineInputAssemblyStateCreateInfo input_assembly_stage{};
+  input_assembly_stage.setTopology(vk::PrimitiveTopology::eTriangleList)
+      .setPrimitiveRestartEnable(false);
 
-  if (const auto result = vkCreateDescriptorSetLayout(
-          device, &createInfo, nullptr, &descriptorSetLayout)) {
-    spdlog::error("Failed to create Vulkan descriptor set layout: {}", result);
-    return VK_NULL_HANDLE;
-  }
+  vk::PipelineShaderStageCreateInfo vertex_shader_stage{};
+  vertex_shader_stage.setStage(vk::ShaderStageFlagBits::eVertex)
+      .setModule(vertex_shader)
+      .setPName("main");
 
-  return descriptorSetLayout;
-}
+  const vk::Viewport viewport = {0, 0, 1024, 1024, 0, 1};
+  constexpr vk::Rect2D scissor = {{0, 0}, {1024, 1024}};
 
-void destroyDescriptorSetLayout(VkDevice device,
-                                VkDescriptorSetLayout descriptorSetLayout) {
-  vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-}
+  vk::PipelineViewportStateCreateInfo viewport_stage{};
+  viewport_stage.setViewports(viewport).setScissors(scissor);
 
-VkShaderModule createShader(VkDevice device, std::string path) {
-  VkShaderModule shader;
+  vk::PipelineRasterizationStateCreateInfo rasterization_stage{};
+  rasterization_stage.setDepthClampEnable(false)
+      .setRasterizerDiscardEnable(false)
+      .setPolygonMode(vk::PolygonMode::eFill)
+      .setLineWidth(1)
+      .setCullMode(vk::CullModeFlagBits::eNone)
+      .setFrontFace(vk::FrontFace::eCounterClockwise)
+      .setDepthBiasEnable(false)
+      .setDepthBiasConstantFactor(0)
+      .setDepthBiasClamp(0)
+      .setDepthBiasSlopeFactor(0);
 
-  std::ifstream file(path, std::ios::binary);
-  std::string source = std::string(std::istreambuf_iterator<char>(file),
-                                   std::istreambuf_iterator<char>());
+  vk::PipelineMultisampleStateCreateInfo multisample_stage{};
+  multisample_stage.setRasterizationSamples(vk::SampleCountFlagBits::e1)
+      .setSampleShadingEnable(false)
+      .setMinSampleShading(0.25);
 
-  VkShaderModuleCreateInfo shaderCreateInfo{};
-  shaderCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  shaderCreateInfo.codeSize = source.size();
-  shaderCreateInfo.pCode = reinterpret_cast<const uint32_t *>(source.data());
+  vk::PipelineDepthStencilStateCreateInfo depth_stencil_stage{};
+  depth_stencil_stage.setDepthTestEnable(true)
+      .setDepthWriteEnable(true)
+      .setDepthCompareOp(vk::CompareOp::eLess)
+      .setDepthBoundsTestEnable(false)
+      .setMinDepthBounds(0)
+      .setMaxDepthBounds(1)
+      .setStencilTestEnable(false);
 
-  VkResult result =
-      vkCreateShaderModule(device, &shaderCreateInfo, nullptr, &shader);
+  vk::PipelineShaderStageCreateInfo fragment_shader_stage{};
+  fragment_shader_stage.setStage(vk::ShaderStageFlagBits::eFragment)
+      .setModule(fragment_shader)
+      .setPName("main");
 
-  if (result != VK_SUCCESS) {
-    std::cerr << "Failed to create Vulkan shader: " << result << std::endl;
-  }
+  vk::PipelineColorBlendAttachmentState color_blend_attachment{};
+  color_blend_attachment
+      .setColorWriteMask(
+          vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+          vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA)
+      .setBlendEnable(true)
+      .setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
+      .setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
+      .setColorBlendOp(vk::BlendOp::eAdd)
+      .setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+      .setDstAlphaBlendFactor(vk::BlendFactor::eOne)
+      .setAlphaBlendOp(vk::BlendOp::eAdd);
 
-  return shader;
-}
+  vk::PipelineColorBlendStateCreateInfo color_blend_stage{};
+  color_blend_stage.setLogicOpEnable(false)
+      .setLogicOp(vk::LogicOp::eCopy)
+      .setAttachments(color_blend_attachment)
+      .setBlendConstants(std::array{0.f, 0.f, 0.f, 0.f});
 
-void destroyShader(VkDevice device, VkShaderModule shader) {
-  vkDestroyShaderModule(device, shader, nullptr);
-}
+  vk::DynamicState dynamic_states[] = {vk::DynamicState::eViewport,
+                                       vk::DynamicState::eScissor};
 
-std::tuple<VkPipelineLayout, VkPipeline>
-createPipeline(VkDevice device, VkRenderPass renderPass,
-               VkDescriptorSetLayout descriptorSetLayout,
-               VkShaderModule vertexShader, VkShaderModule fragmentShader) {
-  VkPipelineLayout pipelineLayout;
-  VkPipeline pipeline;
+  vk::PipelineDynamicStateCreateInfo dynamic_state{};
+  dynamic_state.setDynamicStates(dynamic_states);
 
-  VkPipelineLayoutCreateInfo layoutCreateInfo{};
-  layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  layoutCreateInfo.setLayoutCount = 1;
-  layoutCreateInfo.pSetLayouts = &descriptorSetLayout;
+  vk::PipelineShaderStageCreateInfo shader_stages[] = {vertex_shader_stage,
+                                                       fragment_shader_stage};
 
-  if (const auto result = vkCreatePipelineLayout(device, &layoutCreateInfo,
-                                                 nullptr, &pipelineLayout);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan pipeline layout: {}", result);
+  vk::GraphicsPipelineCreateInfo create_info{};
+  create_info.setStages(shader_stages)
+      .setPVertexInputState(&vertex_input_stage)
+      .setPInputAssemblyState(&input_assembly_stage)
+      .setPTessellationState(nullptr)
+      .setPViewportState(&viewport_stage)
+      .setPRasterizationState(&rasterization_stage)
+      .setPMultisampleState(&multisample_stage)
+      .setPDepthStencilState(&depth_stencil_stage)
+      .setPColorBlendState(&color_blend_stage)
+      .setPDynamicState(&dynamic_state)
+      .setLayout(pipeline_layout)
+      .setRenderPass(render_pass)
+      .setSubpass(0)
+      .setBasePipelineHandle(nullptr)
+      .setBasePipelineIndex(-1);
+
+  const auto result = device.createGraphicsPipeline(nullptr, create_info);
+
+  if (result.result != vk::Result::eSuccess) {
+    spdlog::error("Failed to create Vulkan pipeline: {}",
+                  vk::to_string(result.result));
     return {VK_NULL_HANDLE, VK_NULL_HANDLE};
   }
 
-  VkPipelineVertexInputStateCreateInfo vertexInputStage{};
-  vertexInputStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInputStage.vertexBindingDescriptionCount = 0;
-  vertexInputStage.pVertexBindingDescriptions = nullptr;
-  vertexInputStage.vertexAttributeDescriptionCount = 0;
-  vertexInputStage.pVertexAttributeDescriptions = nullptr;
-
-  VkPipelineInputAssemblyStateCreateInfo inputAssemblyStage{};
-  inputAssemblyStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-  inputAssemblyStage.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-  inputAssemblyStage.primitiveRestartEnable = false;
-
-  VkPipelineShaderStageCreateInfo vertexShaderStage{};
-  vertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  vertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-  vertexShaderStage.module = vertexShader;
-  vertexShaderStage.pName = "main";
-
-  const VkViewport viewport = {0, 0, 1024, 1024, 0, 1};
-  constexpr VkRect2D scissor = {{0, 0}, {1024, 1024}};
-
-  VkPipelineViewportStateCreateInfo viewportStage{};
-  viewportStage.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-  viewportStage.viewportCount = 1;
-  viewportStage.pViewports = &viewport;
-  viewportStage.scissorCount = 1;
-  viewportStage.pScissors = &scissor;
-
-  VkPipelineRasterizationStateCreateInfo rasterizationStage{};
-  rasterizationStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-  rasterizationStage.depthClampEnable = false;
-  rasterizationStage.rasterizerDiscardEnable = false;
-  rasterizationStage.polygonMode = VK_POLYGON_MODE_FILL;
-  rasterizationStage.lineWidth = 1;
-  rasterizationStage.cullMode = VK_CULL_MODE_NONE;
-  rasterizationStage.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  rasterizationStage.depthBiasEnable = false;
-  rasterizationStage.depthBiasConstantFactor = 0;
-  rasterizationStage.depthBiasClamp = 0;
-  rasterizationStage.depthBiasSlopeFactor = 0;
-
-  VkPipelineMultisampleStateCreateInfo multisampleStage{};
-  multisampleStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-  multisampleStage.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-  multisampleStage.sampleShadingEnable = false;
-  multisampleStage.minSampleShading = 0.25;
-
-  VkPipelineDepthStencilStateCreateInfo depthStencilStage{};
-  depthStencilStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-  depthStencilStage.depthTestEnable = true;
-  depthStencilStage.depthWriteEnable = true;
-  depthStencilStage.depthCompareOp = VK_COMPARE_OP_LESS;
-  depthStencilStage.depthBoundsTestEnable = false;
-  depthStencilStage.minDepthBounds = 0;
-  depthStencilStage.maxDepthBounds = 1;
-  depthStencilStage.stencilTestEnable = false;
-
-  VkPipelineShaderStageCreateInfo fragmentShaderStage{};
-  fragmentShaderStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  fragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-  fragmentShaderStage.module = fragmentShader;
-  fragmentShaderStage.pName = "main";
-
-  VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-  colorBlendAttachment.colorWriteMask =
-      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-  colorBlendAttachment.blendEnable = true;
-  colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-  colorBlendAttachment.dstColorBlendFactor =
-      VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-  colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-  colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-  colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-  VkPipelineColorBlendStateCreateInfo colorBlendStage{};
-  colorBlendStage.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-  colorBlendStage.logicOpEnable = false;
-  colorBlendStage.logicOp = VK_LOGIC_OP_COPY;
-  colorBlendStage.attachmentCount = 1;
-  colorBlendStage.pAttachments = &colorBlendAttachment;
-  colorBlendStage.blendConstants[0] = 0;
-  colorBlendStage.blendConstants[1] = 0;
-  colorBlendStage.blendConstants[2] = 0;
-  colorBlendStage.blendConstants[3] = 0;
-
-  VkDynamicState dynamicStates[] = {
-      VK_DYNAMIC_STATE_VIEWPORT,
-      VK_DYNAMIC_STATE_SCISSOR,
-  };
-
-  VkPipelineDynamicStateCreateInfo dynamicState{};
-  dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-  dynamicState.dynamicStateCount = 2;
-  dynamicState.pDynamicStates = dynamicStates;
-
-  VkPipelineShaderStageCreateInfo shaderStages[] = {vertexShaderStage,
-                                                    fragmentShaderStage};
-
-  VkGraphicsPipelineCreateInfo createInfo{};
-  createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-  createInfo.stageCount = 2;
-  createInfo.pStages = shaderStages;
-  createInfo.pVertexInputState = &vertexInputStage;
-  createInfo.pInputAssemblyState = &inputAssemblyStage;
-  createInfo.pTessellationState = nullptr;
-  createInfo.pViewportState = &viewportStage;
-  createInfo.pRasterizationState = &rasterizationStage;
-  createInfo.pMultisampleState = &multisampleStage;
-  createInfo.pDepthStencilState = &depthStencilStage;
-  createInfo.pColorBlendState = &colorBlendStage;
-  createInfo.pDynamicState = &dynamicState;
-  createInfo.layout = pipelineLayout;
-  createInfo.renderPass = renderPass;
-  createInfo.subpass = 0;
-  createInfo.basePipelineHandle = VK_NULL_HANDLE;
-  createInfo.basePipelineIndex = -1;
-
-  if (const auto result = vkCreateGraphicsPipelines(
-          device, nullptr, 1, &createInfo, nullptr, &pipeline);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to create Vulkan pipeline: {}", result);
-    return {VK_NULL_HANDLE, VK_NULL_HANDLE};
-  }
-
-  return {pipelineLayout, pipeline};
+  return {pipeline_layout, result.value};
 }
 
-void destroyPipeline(VkDevice device, VkPipelineLayout pipelineLayout,
-                     VkPipeline pipeline) {
-  vkDestroyPipeline(device, pipeline, nullptr);
-  vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+auto create_session(const xr::Instance instance, const xr::SystemId system_id,
+                    const vk::Instance vulkan_instance,
+                    const vk::PhysicalDevice phys_device,
+                    const vk::Device device, const uint32_t queue_family_index)
+    -> xr::Session {
+  xr::GraphicsBindingVulkanKHR graphics_binding{vulkan_instance, phys_device,
+                                                device, queue_family_index, 0};
+
+  const xr::SessionCreateInfo session_create_info{
+      xr::SessionCreateFlagBits::None, system_id, &graphics_binding};
+
+  return instance.createSession(session_create_info);
 }
 
-XrSession createSession(XrInstance instance, XrSystemId systemID,
-                        VkInstance vulkanInstance, VkPhysicalDevice physDevice,
-                        VkDevice device, uint32_t queueFamilyIndex) {
-  XrSession session;
+auto create_swapchains(const xr::Instance instance, const xr::SystemId system,
+                       const xr::Session session)
+    -> std::tuple<Swapchain *, Swapchain *> {
+  const std::vector<xr::ViewConfigurationView> config_views =
+      instance.enumerateViewConfigurationViewsToVector(
+          system, xr::ViewConfigurationType::PrimaryStereo);
 
-  XrGraphicsBindingVulkanKHR graphicsBinding{};
-  graphicsBinding.type = XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR;
-  graphicsBinding.instance = vulkanInstance;
-  graphicsBinding.physicalDevice = physDevice;
-  graphicsBinding.device = device;
-  graphicsBinding.queueFamilyIndex = queueFamilyIndex;
-  graphicsBinding.queueIndex = 0;
+  const std::vector<int64_t> formats =
+      session.enumerateSwapchainFormatsToVector();
+  int64_t chosen_format = formats.front();
 
-  XrSessionCreateInfo sessionCreateInfo{};
-  sessionCreateInfo.type = XR_TYPE_SESSION_CREATE_INFO;
-  sessionCreateInfo.next = &graphicsBinding;
-  sessionCreateInfo.createFlags = 0;
-  sessionCreateInfo.systemId = systemID;
-
-  if (const auto result =
-          xrCreateSession(instance, &sessionCreateInfo, &session);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create OpenXR session: {}", result);
-    return XR_NULL_HANDLE;
-  }
-
-  return session;
-}
-
-void destroySession(XrSession session) { xrDestroySession(session); }
-
-void destroyInstance(XrInstance instance) { xrDestroyInstance(instance); }
-
-std::tuple<Swapchain *, Swapchain *>
-createSwapchains(XrInstance instance, XrSystemId system, XrSession session) {
-  uint32_t configViewsCount = eyeCount;
-  std::vector<XrViewConfigurationView> configViews(
-      configViewsCount, {.type = XR_TYPE_VIEW_CONFIGURATION_VIEW});
-
-  if (const auto result = xrEnumerateViewConfigurationViews(
-          instance, system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-          configViewsCount, &configViewsCount, configViews.data());
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to enumerate view configuration views: {}", result);
-    return {nullptr, nullptr};
-  }
-
-  uint32_t formatCount = 0;
-
-  if (const auto result =
-          xrEnumerateSwapchainFormats(session, 0, &formatCount, nullptr);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to enumerate swapchain formats: {}", result);
-    return {nullptr, nullptr};
-  }
-
-  std::vector<int64_t> formats(formatCount);
-
-  if (const auto result = xrEnumerateSwapchainFormats(
-          session, formatCount, &formatCount, formats.data());
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to enumerate swapchain formats: {}", result);
-    return {nullptr, nullptr};
-  }
-
-  int64_t chosenFormat = formats.front();
-
-  for (int64_t format : formats) {
+  for (const int64_t format : formats) {
     if (format == VK_FORMAT_R8G8B8A8_SRGB) {
-      chosenFormat = format;
+      chosen_format = format;
       break;
     }
   }
 
-  XrSwapchain swapchains[eyeCount];
+  xr::Swapchain swapchains[eyeCount];
 
   for (uint32_t i = 0; i < eyeCount; i++) {
-    XrSwapchainCreateInfo swapchainCreateInfo{};
-    swapchainCreateInfo.type = XR_TYPE_SWAPCHAIN_CREATE_INFO;
-    swapchainCreateInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    swapchainCreateInfo.format = chosenFormat;
-    swapchainCreateInfo.sampleCount = VK_SAMPLE_COUNT_1_BIT;
-    swapchainCreateInfo.width = configViews[i].recommendedImageRectWidth;
-    swapchainCreateInfo.height = configViews[i].recommendedImageRectHeight;
-    swapchainCreateInfo.faceCount = 1;
-    swapchainCreateInfo.arraySize = 1;
-    swapchainCreateInfo.mipCount = 1;
+    xr::SwapchainCreateInfo swapchain_create_info{
+        xr::SwapchainCreateFlagBits::None,
+        xr::SwapchainUsageFlagBits::ColorAttachment,
+        chosen_format,
+        static_cast<uint32_t>(vk::SampleCountFlagBits::e1),
+        config_views[i].recommendedImageRectWidth,
+        config_views[i].recommendedImageRectHeight,
+        1,
+        1,
+        1};
 
-    if (const auto result =
-            xrCreateSwapchain(session, &swapchainCreateInfo, &swapchains[i]);
-        result != XR_SUCCESS) {
-      spdlog::error("Failed to create swapchain: {}", result);
-      return {nullptr, nullptr};
-    }
+    swapchains[i] = session.createSwapchain(swapchain_create_info);
   }
 
-  return {new Swapchain(swapchains[0], static_cast<VkFormat>(chosenFormat),
-                        configViews[0].recommendedImageRectWidth,
-                        configViews[0].recommendedImageRectHeight),
-          new Swapchain(swapchains[1], static_cast<VkFormat>(chosenFormat),
-                        configViews[1].recommendedImageRectWidth,
-                        configViews[1].recommendedImageRectHeight)};
+  return {new Swapchain(swapchains[0], static_cast<vk::Format>(chosen_format),
+                        config_views[0].recommendedImageRectWidth,
+                        config_views[0].recommendedImageRectHeight),
+          new Swapchain(swapchains[1], static_cast<vk::Format>(chosen_format),
+                        config_views[1].recommendedImageRectWidth,
+                        config_views[1].recommendedImageRectHeight)};
 }
 
-std::vector<XrSwapchainImageVulkanKHR>
-getSwapchainImages(XrSwapchain swapchain) {
-  uint32_t imageCount;
-
-  if (const auto result =
-          xrEnumerateSwapchainImages(swapchain, 0, &imageCount, nullptr);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to enumerate swapchain images: {}", result);
-    return {};
-  }
-
-  std::vector<XrSwapchainImageVulkanKHR> images(
-      imageCount, {.type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
-
-  if (const auto result = xrEnumerateSwapchainImages(
-          swapchain, imageCount, &imageCount,
-          reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data()));
-      result != XR_SUCCESS) {
-    spdlog::error("Failed ot enumerate swapchain images: {}", result);
-    return {};
-  }
-
-  return images;
+auto create_space(const xr::Session session,
+                  xr::ReferenceSpaceType type = xr::ReferenceSpaceType::Stage)
+    -> xr::Space {
+  return session.createReferenceSpace({type, {{0, 0, 0, 1}, {0, 0, 0}}});
 }
 
-XrSpace createSpace(XrSession session) {
-  XrSpace space;
+auto render_eye(Swapchain *swapchain,
+                const std::vector<SwapchainImage *> &images, xr::View view,
+                vk::Device device, vk::Queue queue, vk::RenderPass render_pass,
+                vk::PipelineLayout pipeline_layout, vk::Pipeline pipeline)
+    -> bool {
+  uint32_t active_index;
 
-  XrReferenceSpaceCreateInfo spaceCreateInfo{};
-  spaceCreateInfo.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
-  spaceCreateInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
-  spaceCreateInfo.poseInReferenceSpace = {{0, 0, 0, 1}, {0, 0, 0}};
+  swapchain->swapchain.acquireSwapchainImage({}, &active_index);
 
-  if (const auto result =
-          xrCreateReferenceSpace(session, &spaceCreateInfo, &space);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create space: {}", result);
-    return XR_NULL_HANDLE;
-  }
+  swapchain->swapchain.waitSwapchainImage(
+      {xr::Duration{std::numeric_limits<int64_t>::max()}});
 
-  return space;
-}
+  const SwapchainImage *image = images[active_index];
 
-void destroySpace(XrSpace space) { xrDestroySpace(space); }
+  auto data = static_cast<float *>(device.mapMemory(image->memory, 0, ~0, {}));
 
-bool renderEye(Swapchain *swapchain,
-               const std::vector<SwapchainImage *> &images, XrView view,
-               VkDevice device, VkQueue queue, VkRenderPass renderPass,
-               VkPipelineLayout pipelineLayout, VkPipeline pipeline) {
-  XrSwapchainImageAcquireInfo acquireImageInfo{};
-  acquireImageInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+  float angle_width = tan(view.fov.angleRight) - tan(view.fov.angleLeft);
+  float angle_height = tan(view.fov.angleDown) - tan(view.fov.angleUp);
 
-  uint32_t activeIndex;
+  float projection_matrix[4][4]{{0}};
 
-  if (const auto result = xrAcquireSwapchainImage(
-          swapchain->swapchain, &acquireImageInfo, &activeIndex);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to acquire swapchain image: {}", result);
-    return false;
-  }
-
-  XrSwapchainImageWaitInfo waitImageInfo{};
-  waitImageInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
-  waitImageInfo.timeout = std::numeric_limits<int64_t>::max();
-
-  if (const auto result =
-          xrWaitSwapchainImage(swapchain->swapchain, &waitImageInfo);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to wait for swapchain image: {}", result);
-    return false;
-  }
-
-  const SwapchainImage *image = images[activeIndex];
-
-  float *data;
-
-  if (const auto result = vkMapMemory(device, image->memory, 0, VK_WHOLE_SIZE,
-                                      0, reinterpret_cast<void **>(&data));
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to map Vulkan memory: {}", result);
-  }
-
-  float angleWidth = tan(view.fov.angleRight) - tan(view.fov.angleLeft);
-  float angleHeight = tan(view.fov.angleDown) - tan(view.fov.angleUp);
-
-  float projectionMatrix[4][4]{{0}};
-
-  projectionMatrix[0][0] = 2.0f / angleWidth;
-  projectionMatrix[2][0] =
-      (tan(view.fov.angleRight) + tan(view.fov.angleLeft)) / angleWidth;
-  projectionMatrix[1][1] = 2.0f / angleHeight;
-  projectionMatrix[2][1] =
-      (tan(view.fov.angleUp) + tan(view.fov.angleDown)) / angleHeight;
-  projectionMatrix[2][2] = -farDistance / (farDistance - nearDistance);
-  projectionMatrix[3][2] =
+  projection_matrix[0][0] = 2.0f / angle_width;
+  projection_matrix[2][0] =
+      (tan(view.fov.angleRight) + tan(view.fov.angleLeft)) / angle_width;
+  projection_matrix[1][1] = 2.0f / angle_height;
+  projection_matrix[2][1] =
+      (tan(view.fov.angleUp) + tan(view.fov.angleDown)) / angle_height;
+  projection_matrix[2][2] = -farDistance / (farDistance - nearDistance);
+  projection_matrix[3][2] =
       -(farDistance * nearDistance) / (farDistance - nearDistance);
-  projectionMatrix[2][3] = -1;
+  projection_matrix[2][3] = -1;
 
-  auto viewMatrix = inverse(
+  auto view_matrix = inverse(
       translate(glm::mat4(1.0f),
                 glm::vec3(view.pose.position.x, view.pose.position.y,
                           view.pose.position.z)) *
       mat4_cast(glm::quat(view.pose.orientation.w, view.pose.orientation.x,
                           view.pose.orientation.y, view.pose.orientation.z)));
 
-  float modelMatrix[4][4]{{1, 0, 0, 0},
-                          {0, 1, 0, 0},
-                          {0, 0, 1, 0},
-                          {objectPos.x, objectPos.y, objectPos.z, 1}};
+  float model_matrix[4][4]{{1, 0, 0, 0},
+                           {0, 1, 0, 0},
+                           {0, 0, 1, 0},
+                           {objectPos.x, objectPos.y, objectPos.z, 1}};
 
-  memcpy(data, projectionMatrix, sizeof(float) * 4 * 4);
-  memcpy(data + (4 * 4), value_ptr(viewMatrix), sizeof(float) * 4 * 4);
-  memcpy(data + (4 * 4) * 2, modelMatrix, sizeof(float) * 4 * 4);
+  memcpy(data, projection_matrix, sizeof(float) * 4 * 4);
+  memcpy(4 * 4 + data, value_ptr(view_matrix), sizeof(float) * 4 * 4);
+  memcpy(4 * 4 * 2 + data, model_matrix, sizeof(float) * 4 * 4);
 
-  vkUnmapMemory(device, image->memory);
+  device.unmapMemory(image->memory);
 
-  VkCommandBufferBeginInfo beginInfo{};
-  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vk::CommandBufferBeginInfo begin_info{};
+  begin_info.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
 
-  vkBeginCommandBuffer(image->commandBuffer, &beginInfo);
+  image->commandBuffer.begin(&begin_info);
 
-  VkClearValue clearValue{};
-  clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  vk::ClearValue clear_value{};
+  clear_value.setColor({0.f, 0.f, 0.f, 1.f});
 
-  VkRenderPassBeginInfo beginRenderPassInfo{};
-  beginRenderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-  beginRenderPassInfo.renderPass = renderPass;
-  beginRenderPassInfo.framebuffer = image->framebuffer;
-  beginRenderPassInfo.renderArea = {{0, 0},
-                                    {(swapchain->width), (swapchain->height)}};
-  beginRenderPassInfo.clearValueCount = 1;
-  beginRenderPassInfo.pClearValues = &clearValue;
+  vk::RenderPassBeginInfo begin_render_pass_info{};
+  begin_render_pass_info.setRenderPass(render_pass)
+      .setFramebuffer(image->framebuffer)
+      .setRenderArea({{0, 0}, {(swapchain->width), (swapchain->height)}})
+      .setClearValues(clear_value);
 
-  vkCmdBeginRenderPass(image->commandBuffer, &beginRenderPassInfo,
-                       VK_SUBPASS_CONTENTS_INLINE);
+  image->commandBuffer.beginRenderPass(&begin_render_pass_info,
+                                       vk::SubpassContents::eInline);
 
-  VkViewport viewport = {0,
-                         0,
-                         static_cast<float>(swapchain->width),
-                         static_cast<float>(swapchain->height),
-                         0,
-                         1};
+  vk::Viewport viewport = {0,
+                           0,
+                           static_cast<float>(swapchain->width),
+                           static_cast<float>(swapchain->height),
+                           0,
+                           1};
 
-  vkCmdSetViewport(image->commandBuffer, 0, 1, &viewport);
+  image->commandBuffer.setViewport(0, 1, &viewport);
 
-  VkRect2D scissor = {{0, 0}, swapchain->width, swapchain->height};
+  vk::Rect2D scissor = {{0, 0}, {swapchain->width, swapchain->height}};
 
-  vkCmdSetScissor(image->commandBuffer, 0, 1, &scissor);
+  image->commandBuffer.setScissor(0, 1, &scissor);
 
-  vkCmdBindPipeline(image->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline);
+  image->commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
 
-  vkCmdBindDescriptorSets(image->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipelineLayout, 0, 1, &image->descriptorSet, 0,
-                          nullptr);
+  image->commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics,
+                                          pipeline_layout, 0, 1,
+                                          &image->descriptorSet, 0, nullptr);
 
-  vkCmdDraw(image->commandBuffer, 3, 1, 0, 0);
+  image->commandBuffer.draw(3, 1, 0, 0);
 
-  vkCmdEndRenderPass(image->commandBuffer);
+  image->commandBuffer.endRenderPass();
+  image->commandBuffer.end();
 
-  if (const auto result = vkEndCommandBuffer(image->commandBuffer);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to end Vulkan command buffer: {}", result);
-    return false;
-  }
+  vk::PipelineStageFlags stage_mask =
+      vk::PipelineStageFlagBits::eColorAttachmentOutput;
 
-  VkPipelineStageFlags stageMask =
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  vk::SubmitInfo submit_info{};
+  submit_info.setWaitDstStageMask(stage_mask)
+      .setCommandBuffers(image->commandBuffer)
+      .setWaitSemaphoreCount(0);
 
-  VkSubmitInfo submitInfo{};
-  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-  submitInfo.pWaitDstStageMask = &stageMask;
-  submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &image->commandBuffer;
+  queue.submit(1, &submit_info, nullptr);
 
-  if (const auto result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-      result != VK_SUCCESS) {
-    spdlog::error("Failed to submit Vulkan command buffer: {}", result);
-    return false;
-  }
-
-  XrSwapchainImageReleaseInfo releaseImageInfo{};
-  releaseImageInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
-
-  if (const auto result =
-          xrReleaseSwapchainImage(swapchain->swapchain, &releaseImageInfo);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to release swapchain image: {}", result);
-    return false;
-  }
+  swapchain->swapchain.releaseSwapchainImage({});
 
   return true;
 }
 
-bool render(XrSession session, Swapchain *swapchains[2],
-            std::vector<SwapchainImage *> swapchainImages[2], XrSpace space,
-            XrTime predictedDisplayType, VkDevice device, VkQueue queue,
-            VkRenderPass renderPass, VkPipelineLayout pipelineLayout,
-            VkPipeline pipeline) {
-  XrFrameBeginInfo beginFrameInfo{};
-  beginFrameInfo.type = XR_TYPE_FRAME_BEGIN_INFO;
+auto render(const xr::Session session, Swapchain *swapchains[2],
+            std::vector<SwapchainImage *> swapchain_images[2],
+            const xr::Space space, xr::Time predicted_display_type,
+            const VkDevice device, const VkQueue queue,
+            const VkRenderPass render_pass,
+            const VkPipelineLayout pipeline_layout, const VkPipeline pipeline)
+    -> bool {
+  auto frame = session.beginFrame({});
 
-  if (const auto result = xrBeginFrame(session, &beginFrameInfo);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to begin frame: {}", result);
-    return false;
-  }
+  XrViewState view_state{.type = XR_TYPE_VIEW_STATE};
 
-  XrViewLocateInfo viewLocateInfo{};
-
-  viewLocateInfo.type = XR_TYPE_VIEW_LOCATE_INFO;
-  viewLocateInfo.viewConfigurationType =
-      XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-  viewLocateInfo.displayTime = predictedDisplayType;
-  viewLocateInfo.space = space;
-
-  XrViewState viewState{};
-  viewState.type = XR_TYPE_VIEW_STATE;
-
-  uint32_t viewCount = eyeCount;
-  std::vector<XrView> views(viewCount, {.type = XR_TYPE_VIEW});
-
-  if (const auto result = xrLocateViews(session, &viewLocateInfo, &viewState,
-                                        viewCount, &viewCount, views.data());
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to locate views: {}", result);
-    return false;
-  }
+  constexpr uint32_t view_count = eyeCount;
+  const std::vector<xr::View> views = session.locateViewsToVector(
+      {xr::ViewConfigurationType::PrimaryStereo, predicted_display_type, space},
+      &view_state);
 
   for (size_t i = 0; i < eyeCount; i++) {
-    renderEye(swapchains[i], swapchainImages[i], views[i], device, queue,
-              renderPass, pipelineLayout, pipeline);
+    render_eye(swapchains[i], swapchain_images[i], views[i], device, queue,
+               render_pass, pipeline_layout, pipeline);
   }
 
-  XrCompositionLayerProjectionView projectedViews[2]{};
+  xr::CompositionLayerProjectionView projected_views[2]{};
 
   for (size_t i = 0; i < eyeCount; i++) {
-    projectedViews[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
-    projectedViews[i].pose = views[i].pose;
-    projectedViews[i].fov = views[i].fov;
-    projectedViews[i].subImage = {
-        swapchains[i]->swapchain,
-        {{0, 0},
-         {static_cast<int32_t>(swapchains[i]->width),
-          static_cast<int32_t>(swapchains[i]->height)}},
-        0};
+    projected_views[i].pose = views[i].pose;
+    projected_views[i].fov = views[i].fov;
+    projected_views[i].subImage =
+        xr::SwapchainSubImage{swapchains[i]->swapchain,
+                              {{0, 0},
+                               {static_cast<int32_t>(swapchains[i]->width),
+                                static_cast<int32_t>(swapchains[i]->height)}},
+                              0};
   }
 
-  XrCompositionLayerProjection layer{};
-  layer.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
-  layer.space = space;
-  layer.viewCount = eyeCount;
-  layer.views = projectedViews;
+  const xr::CompositionLayerProjection layer{
+      xr::CompositionLayerFlagBits::None, space, view_count, projected_views};
 
-  auto pLayer = reinterpret_cast<const XrCompositionLayerBaseHeader *>(&layer);
+  auto p_layer =
+      reinterpret_cast<const xr::CompositionLayerBaseHeader *>(&layer);
 
-  XrFrameEndInfo endFrameInfo{};
-  endFrameInfo.type = XR_TYPE_FRAME_END_INFO;
-  endFrameInfo.displayTime = predictedDisplayType;
-  endFrameInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-  endFrameInfo.layerCount = 1;
-  endFrameInfo.layers = &pLayer;
-
-  if (const auto result = xrEndFrame(session, &endFrameInfo);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to end frame: {}", result);
-    return false;
-  }
-
+  session.endFrame(
+      {predicted_display_type, xr::EnvironmentBlendMode::Opaque, 1, &p_layer});
   return true;
 }
 
-XrActionSet createActionSet(XrInstance instance) {
-  XrActionSet actionSet;
-
-  XrActionSetCreateInfo actionSetCreateInfo{};
-  actionSetCreateInfo.type = XR_TYPE_ACTION_SET_CREATE_INFO;
-  strcpy(actionSetCreateInfo.actionSetName, "default");
-  strcpy(actionSetCreateInfo.localizedActionSetName, "Default");
-  actionSetCreateInfo.priority = 0;
-
-  if (const auto result =
-          xrCreateActionSet(instance, &actionSetCreateInfo, &actionSet);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create action set: {}", result);
-    return nullptr;
-  }
-
-  return actionSet;
+auto create_action_set(const xr::Instance instance, const char *name,
+                       const char *localized_name) -> xr::ActionSet {
+  return instance.createActionSet({name, localized_name, 0});
 }
 
-void destroyActionSet(XrActionSet actionSet) { xrDestroyActionSet(actionSet); }
-
-XrAction createAction(XrActionSet actionSet, const char *name,
-                      XrActionType type) {
-  XrAction action;
-
-  XrActionCreateInfo actionCreateInfo{};
-  actionCreateInfo.type = XR_TYPE_ACTION_CREATE_INFO;
-  strcpy(actionCreateInfo.actionName, name);
-  strcpy(actionCreateInfo.localizedActionName, name);
-  actionCreateInfo.actionType = type;
-
-  if (const auto result = xrCreateAction(actionSet, &actionCreateInfo, &action);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create action: {}", result);
-    return nullptr;
-  }
-
-  return action;
+auto create_action(const xr::ActionSet action_set, const char *name,
+                   const char *localized_name, xr::ActionType type)
+    -> xr::Action {
+  return action_set.createAction({name, type, 0, nullptr, localized_name});
 }
 
-void destroyAction(XrAction action) { xrDestroyAction(action); }
-
-XrSpace createActionSpace(XrSession session, XrAction action) {
-  XrSpace space;
-
-  XrActionSpaceCreateInfo actionSpaceCreateInfo{};
-  actionSpaceCreateInfo.type = XR_TYPE_ACTION_SPACE_CREATE_INFO;
-  actionSpaceCreateInfo.action = action;
-  actionSpaceCreateInfo.poseInActionSpace.position = {0, 0, 0};
-  actionSpaceCreateInfo.poseInActionSpace.orientation = {0, 0, 0, 1};
-
-  if (const auto result =
-          xrCreateActionSpace(session, &actionSpaceCreateInfo, &space);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to create action space: {}", result);
-    return XR_NULL_HANDLE;
-  }
-
-  return space;
+auto create_action_space(const xr::Session session, const xr::Action action)
+    -> xr::Space {
+  return session.createActionSpace(
+      {action, xr::Path::null(), {{0, 0, 0, 1}, {0, 0, 0}}});
 }
 
-void destroyActionSpace(XrSpace actionSpace) { xrDestroySpace(actionSpace); }
+auto suggest_bindings(const xr::Instance instance, xr::Action left_hand_action,
+                      xr::Action right_hand_action, xr::Action left_grab_action,
+                      xr::Action right_grab_action) -> void {
+  const auto left_hand_path =
+      instance.stringToPath("/user/hand/left/input/grip/pose");
+  const auto right_hand_path =
+      instance.stringToPath("/user/hand/right/input/grip/pose");
+  const auto left_hand_button_path =
+      instance.stringToPath("/user/hand/left/input/x/click");
+  const auto right_hand_button_path =
+      instance.stringToPath("/user/hand/right/input/a/click");
+  const auto interaction_profile_path =
+      instance.stringToPath("/interaction_profiles/oculus/touch_controller");
 
-XrPath getPath(XrInstance instance, const char *path) {
-  XrPath pathHandle;
-
-  if (const auto result = xrStringToPath(instance, path, &pathHandle);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to get path: {}", result);
-    return XR_NULL_PATH;
-  }
-
-  return pathHandle;
-}
-
-void suggestBindings(XrInstance instance, XrAction leftHandAction,
-                     XrAction rightHandAction, XrAction leftGrabAction,
-                     XrAction rightGrabAction) {
-  auto leftHandPath = getPath(instance, "/user/hand/left/input/grip/pose");
-  auto rightHandPath = getPath(instance, "/user/hand/right/input/grip/pose");
-  auto leftHandButtonPath = getPath(instance, "/user/hand/left/input/x/click");
-  auto rightHandButtonPath =
-      getPath(instance, "/user/hand/right/input/a/click");
-  auto interactionProfilePath =
-      getPath(instance, "/interaction_profiles/oculus/touch_controller");
-
-  XrActionSuggestedBinding suggestedBindings[] = {
-      {leftHandAction, leftHandPath},
-      {rightHandAction, rightHandPath},
-      {leftGrabAction, leftHandButtonPath},
-      {rightGrabAction, rightHandButtonPath},
+  xr::ActionSuggestedBinding suggested_bindings[] = {
+      {left_hand_action, left_hand_path},
+      {right_hand_action, right_hand_path},
+      {left_grab_action, left_hand_button_path},
+      {right_grab_action, right_hand_button_path},
   };
 
-  XrInteractionProfileSuggestedBinding suggestedBinding{};
-  suggestedBinding.type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING;
-  suggestedBinding.interactionProfile = interactionProfilePath;
-  suggestedBinding.countSuggestedBindings =
-      sizeof(suggestedBindings) / sizeof(XrActionSuggestedBinding);
-  suggestedBinding.suggestedBindings = suggestedBindings;
-
-  if (const auto result =
-          xrSuggestInteractionProfileBindings(instance, &suggestedBinding);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to suggest interaction profile bindings: {}", result);
-  }
+  instance.suggestInteractionProfileBindings({interaction_profile_path,
+                                              _countof(suggested_bindings),
+                                              suggested_bindings});
 }
 
-void attachActionSet(XrSession session, XrActionSet actionSet) {
-  XrSessionActionSetsAttachInfo actionSetsAttachInfo{};
-  actionSetsAttachInfo.type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO;
-  actionSetsAttachInfo.countActionSets = 1;
-  actionSetsAttachInfo.actionSets = &actionSet;
-
-  if (const auto result =
-          xrAttachSessionActionSets(session, &actionSetsAttachInfo);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to attach action set: {}", result);
-  }
+auto attach_action_set(const xr::Session session, xr::ActionSet action_set)
+    -> void {
+  session.attachSessionActionSets({1, &action_set});
 }
 
-bool getActionBoolean(XrSession session, XrAction action) {
-  XrActionStateGetInfo getInfo{};
-  getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
-  getInfo.action = action;
-
-  XrActionStateBoolean state{};
-  state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
-
-  if (const auto result = xrGetActionStateBoolean(session, &getInfo, &state);
-      result != XR_SUCCESS) {
-    spdlog::error("Failed to get boolean action state: {}", result);
-    return false;
-  }
-
-  return state.currentState;
+auto get_action_boolean(const xr::Session session, const xr::Action action)
+    -> bool {
+  return session.getActionStateBoolean({action, xr::Path::null()})
+             .currentState == true;
 }
 
-XrPosef getActionPose(XrSession session, XrAction action, XrSpace space,
-                      XrSpace roomSpace, XrTime predictedDisplayTime) {
-  XrPosef pose = {{0, 0, 0, 1}, {0, 0, 0}};
-
-  XrActionStateGetInfo getInfo{};
-  getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
-  getInfo.action = action;
-
-  XrActionStatePose state{};
-  state.type = XR_TYPE_ACTION_STATE_POSE;
-
-  XrResult result = xrGetActionStatePose(session, &getInfo, &state);
-
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to get pose action state: {}", result);
-    return pose;
-  }
-
-  XrSpaceLocation location{};
-  location.type = XR_TYPE_SPACE_LOCATION;
-
-  result = xrLocateSpace(space, roomSpace, predictedDisplayTime, &location);
-
-  if (result != XR_SUCCESS) {
-    spdlog::error("Failed to locate space: {}", result);
-    return pose;
-  }
-
-  if (!(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
-      !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT)) {
-    spdlog::error("Received incomplete result when locating space");
-    return pose;
-  }
-
-  return location.pose;
+auto get_action_pose(const xr::Session session, const xr::Action action,
+                     const xr::Space space, const xr::Space room_space,
+                     const xr::Time predicted_display_time) -> xr::Posef {
+  if (!session.getActionStatePose({action, xr::Path::null()}).isActive)
+    return {};
+  return space.locateSpace(room_space, predicted_display_time).pose;
 }
 
-bool input(XrSession session, XrActionSet actionSet, XrSpace roomSpace,
-           XrTime predictedDisplayTime, XrAction leftHandAction,
-           XrAction rightHandAction, XrAction leftGrabAction,
-           XrAction rightGrabAction, XrSpace leftHandSpace,
-           XrSpace rightHandSpace) {
-  XrActiveActionSet activeActionSet = {actionSet, XR_NULL_PATH};
+auto input(const xr::Session session, const xr::ActionSet action_set,
+           const xr::Space room_space, const xr::Time predicted_display_time,
+           const xr::Action left_hand_action,
+           const xr::Action right_hand_action,
+           const xr::Action left_grab_action,
+           const xr::Action right_grab_action, const xr::Space left_hand_space,
+           const xr::Space right_hand_space) -> bool {
+  xr::ActiveActionSet active_action_set = {action_set, xr::Path::null()};
 
-  XrActionsSyncInfo syncInfo{};
-  syncInfo.type = XR_TYPE_ACTIONS_SYNC_INFO;
-  syncInfo.countActiveActionSets = 1;
-  syncInfo.activeActionSets = &activeActionSet;
-
-  const auto result = xrSyncActions(session, &syncInfo);
-
-  if (result == XR_SESSION_NOT_FOCUSED) {
+  if (const auto sync_result = session.syncActions({1, &active_action_set});
+      sync_result == xr::Result::SessionNotFocused) {
     return true;
-  } else if (result != XR_SUCCESS) {
-    spdlog::error("Failed to synchronize actions: {}", result);
+  } else if (sync_result != xr::Result::Success) {
+    spdlog::error("Failed to synchronize actions: {}",
+                  xr::to_string_literal(sync_result));
     return false;
   }
 
-  auto leftHand = getActionPose(session, leftHandAction, leftHandSpace,
-                                roomSpace, predictedDisplayTime);
-  auto rightHand = getActionPose(session, rightHandAction, rightHandSpace,
-                                 roomSpace, predictedDisplayTime);
+  auto left_hand = get_action_pose(session, left_hand_action, left_hand_space,
+                                   room_space, predicted_display_time);
 
-  bool leftGrab = getActionBoolean(session, leftGrabAction);
-  bool rightGrab = getActionBoolean(session, rightGrabAction);
+  auto right_hand =
+      get_action_pose(session, right_hand_action, right_hand_space, room_space,
+                      predicted_display_time);
 
-  if (leftGrab && !objectGrabbed &&
-      sqrt(pow(objectPos.x - leftHand.position.x, 2) +
-           pow(objectPos.y - leftHand.position.y, 2) +
-           pow(objectPos.z - leftHand.position.z, 2)) < grabDistance) {
+  const auto left_grab = get_action_boolean(session, left_grab_action);
+  const auto right_grab = get_action_boolean(session, right_grab_action);
+
+  if (left_grab && !objectGrabbed &&
+      sqrt(pow(objectPos.x - left_hand.position.x, 2) +
+           pow(objectPos.y - left_hand.position.y, 2) +
+           pow(objectPos.z - left_hand.position.z, 2)) < grabDistance) {
     objectGrabbed = 1;
-  } else if (!leftGrab && objectGrabbed == 1) {
+  } else if (!left_grab && objectGrabbed == 1) {
     objectGrabbed = 0;
   }
 
-  if (rightGrab && !objectGrabbed &&
-      sqrt(pow(objectPos.x - leftHand.position.x, 2) +
-           pow(objectPos.y - leftHand.position.y, 2) +
-           pow(objectPos.z - leftHand.position.z, 2)) < grabDistance) {
+  if (right_grab && !objectGrabbed &&
+      sqrt(pow(objectPos.x - left_hand.position.x, 2) +
+           pow(objectPos.y - left_hand.position.y, 2) +
+           pow(objectPos.z - left_hand.position.z, 2)) < grabDistance) {
     objectGrabbed = 2;
-  } else if (!rightGrab && objectGrabbed == 2) {
+  } else if (!right_grab && objectGrabbed == 2) {
     objectGrabbed = 0;
   }
 
@@ -1575,10 +993,10 @@ bool input(XrSession session, XrActionSet actionSet, XrSpace roomSpace,
   case 0:
     break;
   case 1:
-    objectPos = leftHand.position;
+    objectPos = left_hand.position;
     break;
   case 2:
-    objectPos = rightHand.position;
+    objectPos = right_hand.position;
     break;
   }
 
@@ -1590,178 +1008,162 @@ int main(int, char **) {
   spdlog::set_level(spdlog::level::trace);
 #endif
 
-  auto instance = createInstance();
-  auto debugMessenger = createDebugMessenger(instance);
-  auto system = getSystem(instance);
+  auto instance = create_instance();
+  auto debug_messenger = create_debug_messenger(instance);
+  const auto system = get_system(instance);
 
   auto [graphicsRequirements, instanceExtensions] =
-      getVulkanInstanceRequirements(instance, system);
-  auto vulkanInstance =
-      createVulkanInstance(graphicsRequirements, instanceExtensions);
-  auto vulkanDebugMessenger = createVulkanDebugMessenger(vulkanInstance);
+      get_vulkan_instance_requirements(instance, system);
+  const auto vulkan_instance =
+      create_vulkan_instance(graphicsRequirements, instanceExtensions);
+  const auto vulkan_debug_messenger =
+      create_vulkan_debug_messenger(vulkan_instance);
 
   auto [physicalDevice, deviceExtensions] =
-      getVulkanDeviceRequirements(instance, system, vulkanInstance);
-  auto graphicsQueueFamilyIndex = getDeviceQueueFamily(physicalDevice);
-  auto [device, queue] =
-      createDevice(physicalDevice, graphicsQueueFamilyIndex, deviceExtensions);
+      get_vulkan_device_requirements(instance, system, vulkan_instance);
+  const auto graphics_queue_family_index =
+      get_device_queue_family(physicalDevice);
+  auto [device, queue] = create_device(
+      physicalDevice, graphics_queue_family_index, deviceExtensions);
 
-  auto renderPass = createRenderPass(device);
-  auto commandPool = createCommandPool(device, graphicsQueueFamilyIndex);
-  auto descriptorPool = createDescriptorPool(device);
-  auto descriptorSetLayout = createDescriptorSetLayout(device);
-  auto vertexShader = createShader(device, "data\\vertex.vert.spv");
-  auto fragmentShader = createShader(device, "data\\fragment.frag.spv");
-  auto [pipelineLayout, pipeline] = createPipeline(
-      device, renderPass, descriptorSetLayout, vertexShader, fragmentShader);
+  const auto render_pass = create_render_pass(device);
+  const auto command_pool =
+      create_command_pool(device, graphics_queue_family_index);
+  const auto descriptor_pool = create_descriptor_pool(device);
+  const auto descriptor_set_layout = create_descriptor_set_layout(device);
+  const auto vertex_shader = create_shader(device, "data\\vertex.vert.spv");
+  const auto fragment_shader = create_shader(device, "data\\fragment.frag.spv");
+  auto [pipelineLayout, pipeline] =
+      create_pipeline(device, render_pass, descriptor_set_layout, vertex_shader,
+                      fragment_shader);
 
-  auto session = createSession(instance, system, vulkanInstance, physicalDevice,
-                               device, graphicsQueueFamilyIndex);
+  auto session =
+      create_session(instance, system, vulkan_instance, physicalDevice, device,
+                     graphics_queue_family_index);
 
   Swapchain *swapchains[eyeCount];
   std::tie(swapchains[0], swapchains[1]) =
-      createSwapchains(instance, system, session);
+      create_swapchains(instance, system, session);
 
-  std::vector<XrSwapchainImageVulkanKHR> swapchainImages[eyeCount];
+  std::vector<xr::SwapchainImageVulkanKHR> swapchain_images[eyeCount];
 
   for (size_t i = 0; i < eyeCount; i++) {
-    swapchainImages[i] = getSwapchainImages(swapchains[i]->swapchain);
+    swapchain_images[i] =
+        swapchains[i]
+            ->swapchain
+            .enumerateSwapchainImagesToVector<xr::SwapchainImageVulkanKHR>();
   }
 
-  std::vector<SwapchainImage *> wrappedSwapchainImages[eyeCount];
+  std::vector<SwapchainImage *> wrapped_swapchain_images[eyeCount];
 
   for (size_t i = 0; i < eyeCount; i++) {
-    wrappedSwapchainImages[i] =
-        std::vector<SwapchainImage *>(swapchainImages[i].size(), nullptr);
+    wrapped_swapchain_images[i] =
+        std::vector<SwapchainImage *>(swapchain_images[i].size(), nullptr);
 
-    for (size_t j = 0; j < wrappedSwapchainImages[i].size(); j++) {
-      wrappedSwapchainImages[i][j] = new SwapchainImage(
-          physicalDevice, device, renderPass, commandPool, descriptorPool,
-          descriptorSetLayout, swapchains[i], swapchainImages[i][j]);
+    for (size_t j = 0; j < wrapped_swapchain_images[i].size(); j++) {
+      wrapped_swapchain_images[i][j] = new SwapchainImage(
+          physicalDevice, device, render_pass, command_pool, descriptor_pool,
+          descriptor_set_layout, swapchains[i], swapchain_images[i][j]);
     }
   }
 
-  auto space = createSpace(session);
+  auto space = create_space(session);
 
-  auto actionSet = createActionSet(instance);
+  auto action_set = create_action_set(instance, "default", "Default");
 
-  auto leftHandAction =
-      createAction(actionSet, "left-hand", XR_ACTION_TYPE_POSE_INPUT);
-  auto rightHandAction =
-      createAction(actionSet, "right-hand", XR_ACTION_TYPE_POSE_INPUT);
-  auto leftGrabAction =
-      createAction(actionSet, "left-grab", XR_ACTION_TYPE_BOOLEAN_INPUT);
-  auto rightGrabAction =
-      createAction(actionSet, "right-grab", XR_ACTION_TYPE_BOOLEAN_INPUT);
+  auto left_hand_action = create_action(action_set, "left-hand", "Left Hand",
+                                        xr::ActionType::PoseInput);
+  auto right_hand_action = create_action(action_set, "right-hand", "Right Hand",
+                                         xr::ActionType::PoseInput);
+  auto left_grab_action = create_action(action_set, "left-grab", "Left Grab",
+                                        xr::ActionType::BooleanInput);
+  auto right_grab_action = create_action(action_set, "right-grab", "Right Grab",
+                                         xr::ActionType::BooleanInput);
 
-  auto leftHandSpace = createActionSpace(session, leftHandAction);
-  auto rightHandSpace = createActionSpace(session, rightHandAction);
+  auto left_hand_space = create_action_space(session, left_hand_action);
+  auto right_hand_space = create_action_space(session, right_hand_action);
 
-  suggestBindings(instance, leftHandAction, rightHandAction, leftGrabAction,
-                  rightGrabAction);
-  attachActionSet(session, actionSet);
+  suggest_bindings(instance.get(), left_hand_action, right_hand_action,
+                   left_grab_action, right_grab_action);
+  attach_action_set(session, action_set);
 
   signal(SIGINT, onInterrupt);
 
   bool running = false;
   while (!quit) {
-    XrEventDataBuffer eventData{};
-    eventData.type = XR_TYPE_EVENT_DATA_BUFFER;
+    xr::EventDataBuffer event_data{};
 
-    if (auto result = xrPollEvent(instance, &eventData);
-        result == XR_EVENT_UNAVAILABLE) {
+    if (const auto result = instance.pollEvent(event_data);
+        result == xr::Result::EventUnavailable) {
       if (running) {
-        XrFrameWaitInfo frameWaitInfo{};
-        frameWaitInfo.type = XR_TYPE_FRAME_WAIT_INFO;
+        auto frame_state = session.waitFrame({}, {});
 
-        XrFrameState frameState{};
-        frameState.type = XR_TYPE_FRAME_STATE;
-
-        if (const auto result =
-                xrWaitFrame(session, &frameWaitInfo, &frameState);
-            result != XR_SUCCESS) {
-          spdlog::error("Failed to wait for frame: {}", result);
-          break;
-        }
-
-        if (!frameState.shouldRender) {
+        if (!frame_state.shouldRender) {
           continue;
         }
 
         quit =
-            !input(session, actionSet, space, frameState.predictedDisplayTime,
-                   leftHandAction, rightHandAction, leftGrabAction,
-                   rightGrabAction, leftHandSpace, rightHandSpace);
+            !input(session, action_set, space, frame_state.predictedDisplayTime,
+                   left_hand_action, right_hand_action, left_grab_action,
+                   right_grab_action, left_hand_space, right_hand_space);
 
-        quit = !render(session, swapchains, wrappedSwapchainImages, space,
-                       frameState.predictedDisplayTime, device, queue,
-                       renderPass, pipelineLayout, pipeline);
+        quit = !render(session, swapchains, wrapped_swapchain_images, space,
+                       frame_state.predictedDisplayTime, device, queue,
+                       render_pass, pipelineLayout, pipeline);
       }
-    } else if (result != XR_SUCCESS) {
-      spdlog::error("Failed to poll events: {}", result);
+    } else if (result != xr::Result::Success) {
+      spdlog::error("Failed to poll events: {}", xr::to_string_literal(result));
       break;
     } else {
-      switch (eventData.type) {
+      switch (event_data.type) {
       default:
-        spdlog::error("Unknown event type received: {}", eventData.type);
+        spdlog::error("Unknown event type received: {}",
+                      xr::to_string_literal(event_data.type));
         break;
-      case XR_TYPE_EVENT_DATA_EVENTS_LOST:
+      case xr::StructureType::EventDataEventsLost:
         spdlog::error("Event queue overflowed and events were lost.");
         break;
-      case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
+      case xr::StructureType::EventDataInstanceLossPending:
         spdlog::error("OpenXR instance is shutting down.");
         quit = true;
         break;
-      case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+      case xr::StructureType::EventDataInteractionProfileChanged:
         spdlog::info("The interaction profile has changed.");
         break;
-      case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+      case xr::StructureType::EventDataReferenceSpaceChangePending:
         spdlog::info("The reference space is changing.");
         break;
-      case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
-        switch (
-            const auto event =
-                reinterpret_cast<XrEventDataSessionStateChanged *>(&eventData);
-            event->state) {
-        case XR_SESSION_STATE_UNKNOWN:
-        case XR_SESSION_STATE_MAX_ENUM:
-          spdlog::error("Unknown session state entered: {}", event->state);
+      case xr::StructureType::EventDataSessionStateChanged: {
+        switch (const auto event =
+                    reinterpret_cast<xr::EventDataSessionStateChanged *>(
+                        &event_data);
+                event->state) {
+        case xr::SessionState::Unknown:
+          spdlog::error("Unknown session state entered: {}",
+                        xr::to_string_literal(event->state));
           break;
-        case XR_SESSION_STATE_IDLE:
+        case xr::SessionState::Idle:
           running = false;
           break;
-        case XR_SESSION_STATE_READY: {
-          XrSessionBeginInfo sessionBeginInfo{};
-          sessionBeginInfo.type = XR_TYPE_SESSION_BEGIN_INFO;
-          sessionBeginInfo.primaryViewConfigurationType =
-              XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-
-          result = xrBeginSession(session, &sessionBeginInfo);
-
-          if (result != XR_SUCCESS) {
-            spdlog::error("Failed to being session: {}", result);
-          }
+        case xr::SessionState::Ready: {
+          session.beginSession({xr::ViewConfigurationType::PrimaryStereo});
 
           running = true;
           break;
         }
-        case XR_SESSION_STATE_SYNCHRONIZED:
-        case XR_SESSION_STATE_VISIBLE:
-        case XR_SESSION_STATE_FOCUSED:
+        case xr::SessionState::Synchronized:
+        case xr::SessionState::Visible:
+        case xr::SessionState::Focused:
           running = true;
           break;
-        case XR_SESSION_STATE_STOPPING:
-          result = xrEndSession(session);
-
-          if (result != XR_SUCCESS) {
-            spdlog::error("Failed to end session: {}", result);
-          }
+        case xr::SessionState::Stopping:
+          session.endSession();
           break;
-        case XR_SESSION_STATE_LOSS_PENDING:
+        case xr::SessionState::LossPending:
           spdlog::info("OpenXR session is shutting down.");
           quit = true;
           break;
-        case XR_SESSION_STATE_EXITING:
+        case xr::SessionState::Exiting:
           spdlog::info("OpenXr runtime requested shutdown.");
           quit = true;
           break;
@@ -1776,19 +1178,19 @@ int main(int, char **) {
     spdlog::error("Failed to wait for device to idle: {}", result);
   }
 
-  destroyActionSpace(leftHandSpace);
-  destroyActionSpace(rightHandSpace);
+  left_hand_space.destroy();
+  right_hand_space.destroy();
 
-  destroyAction(rightGrabAction);
-  destroyAction(leftGrabAction);
-  destroyAction(rightHandAction);
-  destroyAction(leftHandAction);
+  right_grab_action.destroy();
+  left_grab_action.destroy();
+  right_hand_action.destroy();
+  left_hand_action.destroy();
 
-  destroyActionSet(actionSet);
+  action_set.destroy();
 
-  destroySpace(space);
+  space.destroy();
 
-  for (const auto &wrappedSwapchainImage : wrappedSwapchainImages) {
+  for (const auto &wrappedSwapchainImage : wrapped_swapchain_images) {
     for (const auto &swapchain_image : wrappedSwapchainImage) {
       delete swapchain_image;
     }
@@ -1798,23 +1200,24 @@ int main(int, char **) {
     delete swapchain;
   }
 
-  destroySession(session);
+  session.destroy();
 
-  destroyPipeline(device, pipelineLayout, pipeline);
-  destroyShader(device, fragmentShader);
-  destroyShader(device, vertexShader);
-  destroyDescriptorSetLayout(device, descriptorSetLayout);
-  destroyDescriptorPool(device, descriptorPool);
-  destroyCommandPool(device, commandPool);
-  destroyRenderPass(device, renderPass);
+  device.destroyPipeline(pipeline);
+  device.destroyPipelineLayout(pipelineLayout);
+  device.destroyShaderModule(fragment_shader);
+  device.destroyShaderModule(vertex_shader);
+  device.destroyDescriptorSetLayout(descriptor_set_layout);
+  device.destroyDescriptorPool(descriptor_pool);
+  device.destroyCommandPool(command_pool);
+  device.destroyRenderPass(render_pass);
 
-  destroyDevice(device);
+  device.destroy();
 
-  destroyVulkanDebugMessenger(vulkanInstance, vulkanDebugMessenger);
-  destroyVulkanInstance(vulkanInstance);
+  destroy_vulkan_debug_messenger(vulkan_instance, vulkan_debug_messenger);
+  vulkan_instance.destroy();
 
-  destroyDebugMessenger(instance, debugMessenger);
-  destroyInstance(instance);
+  debug_messenger.destroy(xr::DispatchLoaderDynamic(instance));
+  instance.destroy();
 
   return 0;
 }

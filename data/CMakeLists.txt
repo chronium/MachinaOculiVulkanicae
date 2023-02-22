@@ -27,6 +27,7 @@ foreach(source IN LISTS SHADERS)
     COMMAND
       Vulkan::glslc
       #      -MD -MF ${SHADER_BINARY_DIR}/${FILENAME}.d
+      --target-env=vulkan1.1
       -o ${SHADER_BINARY_DIR}/${FILENAME}.spv
       ${source}
     OUTPUT ${SHADER_BINARY_DIR}/${FILENAME}.spv
