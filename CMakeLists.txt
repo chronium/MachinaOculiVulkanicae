@@ -25,14 +25,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(OpenXR)
 
-FetchContent_Declare(
-    Vulkan-HPP
-    GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Hpp.git
-    GIT_TAG main
-    GIT_SHALLOW ON
-)
-FetchContent_MakeAvailable(Vulkan-HPP)
-
 set(CODEGEN_FOLDER ${CMAKE_CURRENT_BINARY_DIR}/codegen)
 add_subdirectory(include)
 add_subdirectory(apps)

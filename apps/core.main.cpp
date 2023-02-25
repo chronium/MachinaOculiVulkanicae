@@ -78,7 +78,44 @@ static const float grabDistance = 10;
 static int objectGrabbed = 0;
 static XrVector3f objectPos = {0, 0, 0};
 
+static vk::Buffer vertex_buffer;
+static vk::Buffer index_buffer;
+
 void onInterrupt(int) { quit = true; }
+
+struct Vertex {
+  glm::vec3 pos;
+  glm::vec3 color;
+
+  static auto get_binding_description() -> vk::VertexInputBindingDescription {
+    return vk::VertexInputBindingDescription()
+        .setBinding(0)
+        .setStride(sizeof(Vertex))
+        .setInputRate(vk::VertexInputRate::eVertex);
+  }
+
+  static auto get_attribute_descriptions()
+      -> std::array<vk::VertexInputAttributeDescription, 2> {
+    return {vk::VertexInputAttributeDescription()
+                .setBinding(0)
+                .setLocation(0)
+                .setFormat(vk::Format::eR32G32B32Sfloat)
+                .setOffset(offsetof(Vertex, pos)),
+            vk::VertexInputAttributeDescription()
+                .setBinding(0)
+                .setLocation(1)
+                .setFormat(vk::Format::eR32G32B32Sfloat)
+                .setOffset(offsetof(Vertex, color))};
+  }
+};
+
+const std::vector<Vertex> vertices = {
+    {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}}};
+
+const std::vector<uint16_t> indices = {0, 1, 2, 2, 3, 0};
 
 struct Swapchain {
   Swapchain(xr::Swapchain swapchain, vk::Format format, uint32_t width,
@@ -561,9 +598,12 @@ auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
 
   auto pipeline_layout = device.createPipelineLayout(layout_create_info);
 
+  auto binding_descriptors = Vertex::get_binding_description();
+  auto attribute_descriptors = Vertex::get_attribute_descriptions();
+
   vk::PipelineVertexInputStateCreateInfo vertex_input_stage{};
-  vertex_input_stage.setVertexBindingDescriptions({})
-      .setVertexAttributeDescriptions({});
+  vertex_input_stage.setVertexBindingDescriptions(binding_descriptors)
+      .setVertexAttributeDescriptions(attribute_descriptors);
 
   vk::PipelineInputAssemblyStateCreateInfo input_assembly_stage{};
   input_assembly_stage.setTopology(vk::PrimitiveTopology::eTriangleList)
@@ -816,7 +856,14 @@ auto render_eye(Swapchain *swapchain,
                                           pipeline_layout, 0, 1,
                                           &image->descriptorSet, 0, nullptr);
 
-  image->commandBuffer.draw(3, 1, 0, 0);
+  vk::Buffer vertex_buffers[] = {vertex_buffer};
+  vk::DeviceSize offsets[] = {0};
+
+  image->commandBuffer.bindVertexBuffers(0, 1, vertex_buffers, offsets);
+  image->commandBuffer.bindIndexBuffer(index_buffer, 0, vk::IndexType::eUint16);
+
+  image->commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0,
+                                   0, 0);
 
   image->commandBuffer.endRenderPass();
   image->commandBuffer.end();
@@ -1003,6 +1050,128 @@ auto input(const xr::Session session, const xr::ActionSet action_set,
   return true;
 }
 
+uint32_t find_memory_type(const vk::PhysicalDevice device,
+                          const uint32_t type_filter,
+                          const vk::MemoryPropertyFlags properties) {
+  const auto mem_properties = device.getMemoryProperties();
+
+  for (uint32_t i = 0; i < mem_properties.memoryTypeCount; i++)
+    if (type_filter & (1 << i) && (mem_properties.memoryTypes[i].propertyFlags &
+                                   properties) == properties)
+      return i;
+
+  throw std::runtime_error("Failed to find suitable memory type!");
+}
+
+auto create_buffer(const vk::Device device,
+                   const vk::PhysicalDevice physical_device,
+                   const vk::DeviceSize size, const vk::BufferUsageFlags usage,
+                   const vk::MemoryPropertyFlags properties)
+    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
+  const auto buffer = device.createBuffer(
+      vk::BufferCreateInfo().setSize(size).setUsage(usage).setSharingMode(
+          vk::SharingMode::eExclusive));
+
+  const auto requirements = device.getBufferMemoryRequirements(buffer);
+
+  const auto memory = device.allocateMemory(
+      vk::MemoryAllocateInfo()
+          .setAllocationSize(requirements.size)
+          .setMemoryTypeIndex(find_memory_type(
+              physical_device, requirements.memoryTypeBits, properties)));
+  device.bindBufferMemory(buffer, memory, 0);
+
+  return {buffer, memory};
+}
+
+auto copy_buffer(const vk::Device device, const vk::CommandPool command_pool,
+                 const vk::Queue graphics_queue, const vk::Buffer src_buffer,
+                 const vk::Buffer dst_buffer, const vk::DeviceSize size)
+    -> void {
+  const auto command_buffer = device.allocateCommandBuffers(
+      vk::CommandBufferAllocateInfo()
+          .setLevel(vk::CommandBufferLevel::ePrimary)
+          .setCommandPool(command_pool)
+          .setCommandBufferCount(1))[0];
+
+  command_buffer.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+  vk::BufferCopy copy_region{};
+  copy_region.setSrcOffset(0).setDstOffset(0).setSize(size);
+  command_buffer.copyBuffer(src_buffer, dst_buffer, copy_region);
+
+  command_buffer.end();
+
+  graphics_queue.submit(vk::SubmitInfo().setCommandBuffers(command_buffer));
+  graphics_queue.waitIdle();
+
+  device.freeCommandBuffers(command_pool, command_buffer);
+}
+
+auto create_vertex_buffer(const vk::Device device,
+                          const vk::PhysicalDevice physical_device,
+                          const vk::CommandPool command_pool,
+                          const vk::Queue graphics_queue,
+                          const std::vector<Vertex> &contents)
+    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
+  const vk::DeviceSize buffer_size = sizeof contents[0] * contents.size();
+
+  const auto [staging_buffer, staging_memory] =
+      create_buffer(device, physical_device, buffer_size,
+                    vk::BufferUsageFlagBits::eTransferSrc,
+                    vk::MemoryPropertyFlagBits::eHostVisible |
+                        vk::MemoryPropertyFlagBits::eHostCoherent);
+
+  const auto data = device.mapMemory(staging_memory, 0, buffer_size);
+  memcpy_s(data, buffer_size, contents.data(), buffer_size);
+  device.unmapMemory(staging_memory);
+
+  const auto [buffer, memory] =
+      create_buffer(device, physical_device, buffer_size,
+                    vk::BufferUsageFlagBits::eTransferDst |
+                        vk::BufferUsageFlagBits::eVertexBuffer,
+                    vk::MemoryPropertyFlagBits::eDeviceLocal);
+  copy_buffer(device, command_pool, graphics_queue, staging_buffer, buffer,
+              buffer_size);
+
+  device.destroyBuffer(staging_buffer);
+  device.freeMemory(staging_memory);
+
+  return {buffer, memory};
+}
+
+auto create_index_buffer(const vk::Device device,
+                         const vk::PhysicalDevice physical_device,
+                         const vk::CommandPool command_pool,
+                         const vk::Queue graphics_queue,
+                         const std::vector<uint16_t> &contents)
+    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
+  const vk::DeviceSize buffer_size = sizeof contents[0] * contents.size();
+
+  const auto [staging_buffer, staging_memory] =
+      create_buffer(device, physical_device, buffer_size,
+                    vk::BufferUsageFlagBits::eTransferSrc,
+                    vk::MemoryPropertyFlagBits::eHostVisible |
+                        vk::MemoryPropertyFlagBits::eHostCoherent);
+
+  const auto data = device.mapMemory(staging_memory, 0, buffer_size);
+  memcpy_s(data, buffer_size, contents.data(), buffer_size);
+  device.unmapMemory(staging_memory);
+
+  const auto [buffer, memory] =
+      create_buffer(device, physical_device, buffer_size,
+                    vk::BufferUsageFlagBits::eTransferDst |
+                        vk::BufferUsageFlagBits::eIndexBuffer,
+                    vk::MemoryPropertyFlagBits::eDeviceLocal);
+  copy_buffer(device, command_pool, graphics_queue, staging_buffer, buffer,
+              buffer_size);
+
+  device.destroyBuffer(staging_buffer);
+  device.freeMemory(staging_memory);
+
+  return {buffer, memory};
+}
+
 int main(int, char **) {
 #if defined _DEBUG
   spdlog::set_level(spdlog::level::trace);
@@ -1036,6 +1205,14 @@ int main(int, char **) {
   auto [pipelineLayout, pipeline] =
       create_pipeline(device, render_pass, descriptor_set_layout, vertex_shader,
                       fragment_shader);
+
+  auto [vert_buf, vert_mem] = create_vertex_buffer(
+      device, physicalDevice, command_pool, queue, vertices);
+  vertex_buffer = vert_buf;
+
+  auto [idx_buf, idx_mem] =
+      create_index_buffer(device, physicalDevice, command_pool, queue, indices);
+  index_buffer = idx_buf;
 
   auto session =
       create_session(instance, system, vulkan_instance, physicalDevice, device,
@@ -1201,6 +1378,12 @@ int main(int, char **) {
   }
 
   session.destroy();
+
+  device.freeMemory(idx_mem);
+  device.destroyBuffer(idx_buf);
+
+  device.freeMemory(vert_mem);
+  device.destroyBuffer(vert_buf);
 
   device.destroyPipeline(pipeline);
   device.destroyPipelineLayout(pipelineLayout);
