@@ -9,11 +9,14 @@ layout(location = 0) out vec3 color;
 layout(binding = 0) uniform Matrices {
     mat4 projection;
     mat4 view;
-    mat4 model;
 } matrices;
+
+layout(push_constant) uniform constants {
+    mat4 model;
+} PushConstants;
 
 void main()
 {
-    gl_Position = matrices.projection * matrices.view * matrices.model * vec4(inPosition, 1);
+    gl_Position = matrices.projection * matrices.view * PushConstants.model * vec4(inPosition, 1);
     color = inColor;
 }

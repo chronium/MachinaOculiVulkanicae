@@ -20,6 +20,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <mov/VkBuffer.hpp>
+
 const std::map<XrDebugUtilsMessageTypeFlagsEXT, std::string> xrMessageTypeMap =
     {
         {XR_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, "General"},
@@ -64,7 +66,7 @@ static const char *const extensionNames[] = {
 static const char *const vulkanLayerNames[] = {"VK_LAYER_KHRONOS_validation"};
 static const char *const vulkanExtensionNames[] = {"VK_EXT_debug_utils"};
 
-static const size_t bufferSize = sizeof(float) * 4 * 4 * 3;
+static const size_t bufferSize = sizeof(float) * 4 * 4 * 2;
 
 static const size_t eyeCount = 2;
 
@@ -78,35 +80,16 @@ static const float grabDistance = 10;
 static int objectGrabbed = 0;
 static XrVector3f objectPos = {0, 0, 0};
 
-static vk::Buffer vertex_buffer;
-static vk::Buffer index_buffer;
+static XrVector3f right_hand_pos{0, 0, 0};
+static XrQuaternionf right_hand_orientation{0, 0, 0, 1};
+
+static mov::VkBuffer<Vertex> vertex_buffer;
+static mov::VkBuffer<uint16_t> index_buffer;
 
 void onInterrupt(int) { quit = true; }
 
-struct Vertex {
-  glm::vec3 pos;
-  glm::vec3 color;
-
-  static auto get_binding_description() -> vk::VertexInputBindingDescription {
-    return vk::VertexInputBindingDescription()
-        .setBinding(0)
-        .setStride(sizeof(Vertex))
-        .setInputRate(vk::VertexInputRate::eVertex);
-  }
-
-  static auto get_attribute_descriptions()
-      -> std::array<vk::VertexInputAttributeDescription, 2> {
-    return {vk::VertexInputAttributeDescription()
-                .setBinding(0)
-                .setLocation(0)
-                .setFormat(vk::Format::eR32G32B32Sfloat)
-                .setOffset(offsetof(Vertex, pos)),
-            vk::VertexInputAttributeDescription()
-                .setBinding(0)
-                .setLocation(1)
-                .setFormat(vk::Format::eR32G32B32Sfloat)
-                .setOffset(offsetof(Vertex, color))};
-  }
+struct PushConstants {
+  glm::mat4 model;
 };
 
 const std::vector<Vertex> vertices = {
@@ -594,7 +577,12 @@ auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
                      vk::ShaderModule fragment_shader)
     -> std::tuple<vk::PipelineLayout, vk::Pipeline> {
   vk::PipelineLayoutCreateInfo layout_create_info{};
-  layout_create_info.setSetLayouts(descriptor_set_layout);
+  layout_create_info.setSetLayouts(descriptor_set_layout)
+      .setPushConstantRanges(
+          vk::PushConstantRange()
+              .setOffset(0)
+              .setSize(sizeof PushConstants)
+              .setStageFlags(vk::ShaderStageFlagBits::eVertex));
 
   auto pipeline_layout = device.createPipelineLayout(layout_create_info);
 
@@ -809,14 +797,8 @@ auto render_eye(Swapchain *swapchain,
       mat4_cast(glm::quat(view.pose.orientation.w, view.pose.orientation.x,
                           view.pose.orientation.y, view.pose.orientation.z)));
 
-  float model_matrix[4][4]{{1, 0, 0, 0},
-                           {0, 1, 0, 0},
-                           {0, 0, 1, 0},
-                           {objectPos.x, objectPos.y, objectPos.z, 1}};
-
   memcpy(data, projection_matrix, sizeof(float) * 4 * 4);
   memcpy(4 * 4 + data, value_ptr(view_matrix), sizeof(float) * 4 * 4);
-  memcpy(4 * 4 * 2 + data, model_matrix, sizeof(float) * 4 * 4);
 
   device.unmapMemory(image->memory);
 
@@ -856,11 +838,35 @@ auto render_eye(Swapchain *swapchain,
                                           pipeline_layout, 0, 1,
                                           &image->descriptorSet, 0, nullptr);
 
-  vk::Buffer vertex_buffers[] = {vertex_buffer};
+  vk::Buffer vertex_buffers[] = {vertex_buffer.buffer};
   vk::DeviceSize offsets[] = {0};
 
   image->commandBuffer.bindVertexBuffers(0, 1, vertex_buffers, offsets);
-  image->commandBuffer.bindIndexBuffer(index_buffer, 0, vk::IndexType::eUint16);
+  image->commandBuffer.bindIndexBuffer(index_buffer.buffer, 0,
+                                       vk::IndexType::eUint16);
+
+  auto constants = PushConstants{
+      glm::translate(glm::identity<glm::mat4>(),
+                     glm::vec3(objectPos.x, objectPos.y, objectPos.z))};
+
+  image->commandBuffer.pushConstants(pipeline_layout,
+                                     vk::ShaderStageFlagBits::eVertex, 0,
+                                     sizeof PushConstants, &constants);
+
+  image->commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0,
+                                   0, 0);
+
+  constants =
+      PushConstants{glm::translate(glm::identity<glm::mat4>(),
+                                   glm::vec3(right_hand_pos.x, right_hand_pos.y,
+                                             right_hand_pos.z)) *
+                    glm::mat4_cast(glm::quat(
+                        right_hand_orientation.w, right_hand_orientation.x,
+                        right_hand_orientation.y, right_hand_orientation.z)) * glm::scale(glm::identity<glm::mat4>(), glm::vec3(0.1f))};
+
+  image->commandBuffer.pushConstants(pipeline_layout,
+                                     vk::ShaderStageFlagBits::eVertex, 0,
+                                     sizeof PushConstants, &constants);
 
   image->commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0,
                                    0, 0);
@@ -1015,6 +1021,9 @@ auto input(const xr::Session session, const xr::ActionSet action_set,
       get_action_pose(session, right_hand_action, right_hand_space, room_space,
                       predicted_display_time);
 
+  right_hand_pos = right_hand.position;
+  right_hand_orientation = right_hand.orientation;
+
   const auto left_grab = get_action_boolean(session, left_grab_action);
   const auto right_grab = get_action_boolean(session, right_grab_action);
 
@@ -1063,115 +1072,6 @@ uint32_t find_memory_type(const vk::PhysicalDevice device,
   throw std::runtime_error("Failed to find suitable memory type!");
 }
 
-auto create_buffer(const vk::Device device,
-                   const vk::PhysicalDevice physical_device,
-                   const vk::DeviceSize size, const vk::BufferUsageFlags usage,
-                   const vk::MemoryPropertyFlags properties)
-    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
-  const auto buffer = device.createBuffer(
-      vk::BufferCreateInfo().setSize(size).setUsage(usage).setSharingMode(
-          vk::SharingMode::eExclusive));
-
-  const auto requirements = device.getBufferMemoryRequirements(buffer);
-
-  const auto memory = device.allocateMemory(
-      vk::MemoryAllocateInfo()
-          .setAllocationSize(requirements.size)
-          .setMemoryTypeIndex(find_memory_type(
-              physical_device, requirements.memoryTypeBits, properties)));
-  device.bindBufferMemory(buffer, memory, 0);
-
-  return {buffer, memory};
-}
-
-auto copy_buffer(const vk::Device device, const vk::CommandPool command_pool,
-                 const vk::Queue graphics_queue, const vk::Buffer src_buffer,
-                 const vk::Buffer dst_buffer, const vk::DeviceSize size)
-    -> void {
-  const auto command_buffer = device.allocateCommandBuffers(
-      vk::CommandBufferAllocateInfo()
-          .setLevel(vk::CommandBufferLevel::ePrimary)
-          .setCommandPool(command_pool)
-          .setCommandBufferCount(1))[0];
-
-  command_buffer.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
-
-  vk::BufferCopy copy_region{};
-  copy_region.setSrcOffset(0).setDstOffset(0).setSize(size);
-  command_buffer.copyBuffer(src_buffer, dst_buffer, copy_region);
-
-  command_buffer.end();
-
-  graphics_queue.submit(vk::SubmitInfo().setCommandBuffers(command_buffer));
-  graphics_queue.waitIdle();
-
-  device.freeCommandBuffers(command_pool, command_buffer);
-}
-
-auto create_vertex_buffer(const vk::Device device,
-                          const vk::PhysicalDevice physical_device,
-                          const vk::CommandPool command_pool,
-                          const vk::Queue graphics_queue,
-                          const std::vector<Vertex> &contents)
-    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
-  const vk::DeviceSize buffer_size = sizeof contents[0] * contents.size();
-
-  const auto [staging_buffer, staging_memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferSrc,
-                    vk::MemoryPropertyFlagBits::eHostVisible |
-                        vk::MemoryPropertyFlagBits::eHostCoherent);
-
-  const auto data = device.mapMemory(staging_memory, 0, buffer_size);
-  memcpy_s(data, buffer_size, contents.data(), buffer_size);
-  device.unmapMemory(staging_memory);
-
-  const auto [buffer, memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferDst |
-                        vk::BufferUsageFlagBits::eVertexBuffer,
-                    vk::MemoryPropertyFlagBits::eDeviceLocal);
-  copy_buffer(device, command_pool, graphics_queue, staging_buffer, buffer,
-              buffer_size);
-
-  device.destroyBuffer(staging_buffer);
-  device.freeMemory(staging_memory);
-
-  return {buffer, memory};
-}
-
-auto create_index_buffer(const vk::Device device,
-                         const vk::PhysicalDevice physical_device,
-                         const vk::CommandPool command_pool,
-                         const vk::Queue graphics_queue,
-                         const std::vector<uint16_t> &contents)
-    -> std::tuple<vk::Buffer, vk::DeviceMemory> {
-  const vk::DeviceSize buffer_size = sizeof contents[0] * contents.size();
-
-  const auto [staging_buffer, staging_memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferSrc,
-                    vk::MemoryPropertyFlagBits::eHostVisible |
-                        vk::MemoryPropertyFlagBits::eHostCoherent);
-
-  const auto data = device.mapMemory(staging_memory, 0, buffer_size);
-  memcpy_s(data, buffer_size, contents.data(), buffer_size);
-  device.unmapMemory(staging_memory);
-
-  const auto [buffer, memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferDst |
-                        vk::BufferUsageFlagBits::eIndexBuffer,
-                    vk::MemoryPropertyFlagBits::eDeviceLocal);
-  copy_buffer(device, command_pool, graphics_queue, staging_buffer, buffer,
-              buffer_size);
-
-  device.destroyBuffer(staging_buffer);
-  device.freeMemory(staging_memory);
-
-  return {buffer, memory};
-}
-
 int main(int, char **) {
 #if defined _DEBUG
   spdlog::set_level(spdlog::level::trace);
@@ -1206,13 +1106,13 @@ int main(int, char **) {
       create_pipeline(device, render_pass, descriptor_set_layout, vertex_shader,
                       fragment_shader);
 
-  auto [vert_buf, vert_mem] = create_vertex_buffer(
-      device, physicalDevice, command_pool, queue, vertices);
-  vertex_buffer = vert_buf;
+  vertex_buffer = mov::VkBuffer(device, physicalDevice, command_pool, queue,
+                                vk::BufferUsageFlagBits::eVertexBuffer,
+                                vertices.data(), vertices.size());
 
-  auto [idx_buf, idx_mem] =
-      create_index_buffer(device, physicalDevice, command_pool, queue, indices);
-  index_buffer = idx_buf;
+  index_buffer = mov::VkBuffer(device, physicalDevice, command_pool, queue,
+                               vk::BufferUsageFlagBits::eIndexBuffer,
+                               indices.data(), indices.size());
 
   auto session =
       create_session(instance, system, vulkan_instance, physicalDevice, device,
@@ -1379,11 +1279,8 @@ int main(int, char **) {
 
   session.destroy();
 
-  device.freeMemory(idx_mem);
-  device.destroyBuffer(idx_buf);
-
-  device.freeMemory(vert_mem);
-  device.destroyBuffer(vert_buf);
+  index_buffer.destroy();
+  vertex_buffer.destroy();
 
   device.destroyPipeline(pipeline);
   device.destroyPipelineLayout(pipelineLayout);
