@@ -22,6 +22,8 @@
 
 #include <mov/VkBuffer.hpp>
 
+#include "mov/VkImage.hpp"
+
 const std::map<XrDebugUtilsMessageTypeFlagsEXT, std::string> xrMessageTypeMap =
     {
         {XR_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT, "General"},
@@ -83,7 +85,7 @@ static XrVector3f objectPos = {0, 0, 0};
 static XrVector3f right_hand_pos{0, 0, 0};
 static XrQuaternionf right_hand_orientation{0, 0, 0, 1};
 
-static mov::VkBuffer<Vertex> vertex_buffer;
+static mov::VkBuffer<mov::Vertex> vertex_buffer;
 static mov::VkBuffer<uint16_t> index_buffer;
 
 void onInterrupt(int) { quit = true; }
@@ -92,7 +94,7 @@ struct PushConstants {
   glm::mat4 model;
 };
 
-const std::vector<Vertex> vertices = {
+const std::vector<mov::Vertex> vertices = {
     {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
     {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
@@ -112,6 +114,33 @@ struct Swapchain {
   uint32_t width;
   uint32_t height;
 };
+
+auto find_supported_format(const vk::PhysicalDevice physical_device,
+                           const std::vector<vk::Format> &candidates,
+                           const vk::ImageTiling tiling,
+                           const vk::FormatFeatureFlags features) {
+  for (const auto &format : candidates) {
+    auto props = physical_device.getFormatProperties(format);
+
+    if (tiling == vk::ImageTiling::eLinear &&
+        (props.linearTilingFeatures & features) == features)
+      return format;
+    if (tiling == vk::ImageTiling::eOptimal &&
+        (props.optimalTilingFeatures & features) == features)
+      return format;
+  }
+
+  throw std::runtime_error("failed to find supported format!");
+}
+
+auto find_depth_format(const vk::PhysicalDevice physical_device) -> vk::Format {
+  return find_supported_format(
+      physical_device,
+      {vk::Format::eD32Sfloat, vk::Format::eD32SfloatS8Uint,
+       vk::Format::eD24UnormS8Uint},
+      vk::ImageTiling::eOptimal,
+      vk::FormatFeatureFlagBits::eDepthStencilAttachment);
+}
 
 struct SwapchainImage {
   SwapchainImage(vk::PhysicalDevice physical_device, vk::Device device,
@@ -133,10 +162,18 @@ struct SwapchainImage {
                                  .setLayerCount(1));
 
     imageView = device.createImageView(image_view_create_info);
+    depthImage =
+        mov::VkImage(device, physical_device, swapchain->width,
+                     swapchain->height, find_depth_format(physical_device),
+                     vk::ImageTiling::eOptimal, vk::ImageAspectFlagBits::eDepth,
+                     vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                     vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+    vk::ImageView imageViews[2] = {imageView, depthImage.image_view};
 
     vk::FramebufferCreateInfo framebuffer_create_info{};
     framebuffer_create_info.setRenderPass(render_pass)
-        .setAttachments(imageView)
+        .setAttachments(imageViews)
         .setWidth(swapchain->width)
         .setHeight(swapchain->height)
         .setLayers(1);
@@ -223,6 +260,7 @@ struct SwapchainImage {
     device.freeMemory(memory);
     device.destroyFramebuffer(framebuffer);
     device.destroyImageView(imageView);
+    depthImage.destroy();
   }
 
   xr::SwapchainImageVulkanKHR image;
@@ -233,13 +271,15 @@ struct SwapchainImage {
   vk::CommandBuffer commandBuffer;
   vk::DescriptorSet descriptorSet;
 
+  mov::VkImage depthImage;
+
 private:
   vk::Device device;
   vk::CommandPool commandPool;
   vk::DescriptorPool descriptorPool;
 };
 
-auto create_instance() -> xr::Instance {
+auto create_instance() {
   return xr::createInstance(
       {xr::InstanceCreateFlags(),
        xr::ApplicationInfo{applicationName,
@@ -300,7 +340,7 @@ auto create_debug_messenger(const xr::Instance instance)
       xr::DispatchLoaderDynamic(instance));
 }
 
-auto get_system(const xr::Instance instance) -> xr::SystemId {
+auto get_system(const xr::Instance instance) {
   const xr::SystemGetInfo system_get_info{xr::FormFactor::HeadMountedDisplay};
 
   return instance.getSystem(system_get_info);
@@ -327,7 +367,7 @@ auto get_vulkan_instance_requirements(const xr::Instance instance,
 
 auto get_vulkan_device_requirements(const xr::Instance instance,
                                     const xr::SystemId system,
-                                    const VkInstance vulkan_instance)
+                                    const vk::Instance vulkan_instance)
     -> std::tuple<VkPhysicalDevice, std::set<std::string>> {
   VkPhysicalDevice physical_device;
 
@@ -354,7 +394,7 @@ auto get_vulkan_device_requirements(const xr::Instance instance,
 
 auto create_vulkan_instance(
     const xr::GraphicsRequirementsVulkanKHR graphics_requirements,
-    const std::set<std::string> &instance_extensions) -> vk::Instance {
+    const std::set<std::string> &instance_extensions) {
   std::vector<const char *> extensions;
   extensions.reserve(instance_extensions.size());
   std::ranges::transform(instance_extensions, std::back_inserter(extensions),
@@ -418,8 +458,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
 // ReSharper restore CppParameterMayBeConst
 // ReSharper restore CppInconsistentNaming
 
-auto create_vulkan_debug_messenger(const vk::Instance instance)
-    -> vk::DebugUtilsMessengerEXT {
+auto create_vulkan_debug_messenger(const vk::Instance instance) {
   vk::DebugUtilsMessageSeverityFlagsEXT severity_flags{
       vk::DebugUtilsMessageSeverityFlagBitsEXT::eError |
       vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo |
@@ -443,7 +482,7 @@ auto create_vulkan_debug_messenger(const vk::Instance instance)
 
 auto destroy_vulkan_debug_messenger(
     const vk::Instance instance,
-    const vk::DebugUtilsMessengerEXT debug_messenger) -> void {
+    const vk::DebugUtilsMessengerEXT debug_messenger) {
   pfnVkDestroyDebugUtilsMessengerEXT =
       reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
           instance.getProcAddr("vkDestroyDebugUtilsMessengerEXT"));
@@ -451,8 +490,7 @@ auto destroy_vulkan_debug_messenger(
   instance.destroyDebugUtilsMessengerEXT(debug_messenger);
 }
 
-auto get_device_queue_family(const vk::PhysicalDevice physical_device)
-    -> uint32_t {
+auto get_device_queue_family(const vk::PhysicalDevice physical_device) {
   uint32_t graphics_queue_family_index = -1;
 
   const std::vector<vk::QueueFamilyProperties> queue_families =
@@ -487,9 +525,13 @@ auto create_device(const vk::PhysicalDevice physical_device,
   vk::DeviceQueueCreateInfo queue_create_info{
       vk::DeviceQueueCreateFlags{}, graphics_queue_family_index, 1, &priority};
 
+  vk::PhysicalDeviceFeatures physical_features{};
+  physical_features.setSamplerAnisotropy(true);
+
   vk::DeviceCreateInfo create_info{};
   create_info.setQueueCreateInfos(queue_create_info)
-      .setPEnabledExtensionNames(extensions);
+      .setPEnabledExtensionNames(extensions)
+      .setPEnabledFeatures(&physical_features);
 
   auto device = physical_device.createDevice(create_info);
 
@@ -498,7 +540,8 @@ auto create_device(const vk::PhysicalDevice physical_device,
   return {device, queue};
 }
 
-auto create_render_pass(const vk::Device device) -> vk::RenderPass {
+auto create_render_pass(const vk::Device device,
+                        const vk::PhysicalDevice physical_device) {
   vk::AttachmentDescription attachment{};
   attachment.setFormat(vk::Format::eR8G8B8A8Srgb)
       .setSamples(vk::SampleCountFlagBits::e1)
@@ -513,25 +556,60 @@ auto create_render_pass(const vk::Device device) -> vk::RenderPass {
   attachment_ref.setAttachment(0).setLayout(
       vk::ImageLayout::eColorAttachmentOptimal);
 
+  vk::AttachmentDescription depth_attachment{};
+  depth_attachment.setFormat(find_depth_format(physical_device))
+      .setSamples(vk::SampleCountFlagBits::e1)
+      .setLoadOp(vk::AttachmentLoadOp::eClear)
+      .setStoreOp(vk::AttachmentStoreOp::eStore)
+      .setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+      .setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+      .setInitialLayout(vk::ImageLayout::eUndefined)
+      .setFinalLayout(vk::ImageLayout::eDepthAttachmentOptimal);
+
+  vk::AttachmentReference depth_ref{};
+  depth_ref.setAttachment(1).setLayout(
+      vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
   vk::SubpassDescription subpass{};
   subpass.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
-      .setColorAttachments(attachment_ref);
+      .setColorAttachments(attachment_ref)
+      .setPDepthStencilAttachment(&depth_ref);
+
+  vk::SubpassDependency dependency{};
+  dependency.setSrcSubpass(VK_SUBPASS_EXTERNAL)
+  .setDstSubpass(0)
+  .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+  .setSrcAccessMask(vk::AccessFlagBits::eNone)
+  .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+  .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite);
+
+  vk::SubpassDependency depth_dependency{};
+  depth_dependency.setSrcSubpass(VK_SUBPASS_EXTERNAL)
+      .setDstSubpass(0)
+      .setSrcStageMask(vk::PipelineStageFlagBits::eEarlyFragmentTests |
+                       vk::PipelineStageFlagBits::eLateFragmentTests)
+      .setSrcAccessMask(vk::AccessFlagBits::eNone)
+      .setDstStageMask(vk::PipelineStageFlagBits::eEarlyFragmentTests |
+                       vk::PipelineStageFlagBits::eLateFragmentTests)
+      .setDstAccessMask(vk::AccessFlagBits::eDepthStencilAttachmentWrite);
+
+  vk::AttachmentDescription attachments[2] = {attachment, depth_attachment};
+  vk::SubpassDependency dependencies[2] = {dependency, depth_dependency};
 
   vk::RenderPassCreateInfo create_info{};
-  create_info.setAttachments(attachment).setSubpasses(subpass);
+  create_info.setAttachments(attachments).setSubpasses(subpass).setDependencies(dependencies);
 
   return device.createRenderPass(create_info, nullptr);
 }
 
 auto create_command_pool(const vk::Device device,
-                         const uint32_t graphics_queue_family_index)
-    -> vk::CommandPool {
+                         const uint32_t graphics_queue_family_index) {
   return device.createCommandPool(
       {vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
        graphics_queue_family_index});
 }
 
-vk::DescriptorPool create_descriptor_pool(const vk::Device device) {
+auto create_descriptor_pool(const vk::Device device) {
   vk::DescriptorPoolSize pool_size{};
   pool_size.setType(vk::DescriptorType::eUniformBuffer).setDescriptorCount(32);
 
@@ -543,7 +621,7 @@ vk::DescriptorPool create_descriptor_pool(const vk::Device device) {
   return device.createDescriptorPool(create_info);
 }
 
-vk::DescriptorSetLayout create_descriptor_set_layout(const vk::Device device) {
+auto create_descriptor_set_layout(const vk::Device device) {
   vk::DescriptorSetLayoutBinding binding{};
   binding.setBinding(0)
       .setDescriptorType(vk::DescriptorType::eUniformBuffer)
@@ -556,8 +634,7 @@ vk::DescriptorSetLayout create_descriptor_set_layout(const vk::Device device) {
   return device.createDescriptorSetLayout(create_info);
 }
 
-auto create_shader(const vk::Device device, const std::string &path)
-    -> vk::ShaderModule {
+auto create_shader(const vk::Device device, const std::string &path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   const std::streamsize file_size = file.tellg();
   file.seekg(0, std::ios::beg);
@@ -586,8 +663,8 @@ auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
 
   auto pipeline_layout = device.createPipelineLayout(layout_create_info);
 
-  auto binding_descriptors = Vertex::get_binding_description();
-  auto attribute_descriptors = Vertex::get_attribute_descriptions();
+  auto binding_descriptors = mov::Vertex::get_binding_description();
+  auto attribute_descriptors = mov::Vertex::get_attribute_descriptions();
 
   vk::PipelineVertexInputStateCreateInfo vertex_input_stage{};
   vertex_input_stage.setVertexBindingDescriptions(binding_descriptors)
@@ -698,8 +775,8 @@ auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
 auto create_session(const xr::Instance instance, const xr::SystemId system_id,
                     const vk::Instance vulkan_instance,
                     const vk::PhysicalDevice phys_device,
-                    const vk::Device device, const uint32_t queue_family_index)
-    -> xr::Session {
+                    const vk::Device device,
+                    const uint32_t queue_family_index) {
   xr::GraphicsBindingVulkanKHR graphics_binding{vulkan_instance, phys_device,
                                                 device, queue_family_index, 0};
 
@@ -753,16 +830,14 @@ auto create_swapchains(const xr::Instance instance, const xr::SystemId system,
 }
 
 auto create_space(const xr::Session session,
-                  xr::ReferenceSpaceType type = xr::ReferenceSpaceType::Stage)
-    -> xr::Space {
+                  xr::ReferenceSpaceType type = xr::ReferenceSpaceType::Stage) {
   return session.createReferenceSpace({type, {{0, 0, 0, 1}, {0, 0, 0}}});
 }
 
 auto render_eye(Swapchain *swapchain,
                 const std::vector<SwapchainImage *> &images, xr::View view,
                 vk::Device device, vk::Queue queue, vk::RenderPass render_pass,
-                vk::PipelineLayout pipeline_layout, vk::Pipeline pipeline)
-    -> bool {
+                vk::PipelineLayout pipeline_layout, vk::Pipeline pipeline) {
   uint32_t active_index;
 
   swapchain->swapchain.acquireSwapchainImage({}, &active_index);
@@ -810,11 +885,16 @@ auto render_eye(Swapchain *swapchain,
   vk::ClearValue clear_value{};
   clear_value.setColor({0.f, 0.f, 0.f, 1.f});
 
+  vk::ClearValue depth_value{};
+  depth_value.setDepthStencil({1.0f, 0});
+
+  vk::ClearValue clear_values[2] = {clear_value, depth_value};
+
   vk::RenderPassBeginInfo begin_render_pass_info{};
   begin_render_pass_info.setRenderPass(render_pass)
       .setFramebuffer(image->framebuffer)
       .setRenderArea({{0, 0}, {(swapchain->width), (swapchain->height)}})
-      .setClearValues(clear_value);
+      .setClearValues(clear_values);
 
   image->commandBuffer.beginRenderPass(&begin_render_pass_info,
                                        vk::SubpassContents::eInline);
@@ -862,7 +942,8 @@ auto render_eye(Swapchain *swapchain,
                                              right_hand_pos.z)) *
                     glm::mat4_cast(glm::quat(
                         right_hand_orientation.w, right_hand_orientation.x,
-                        right_hand_orientation.y, right_hand_orientation.z)) * glm::scale(glm::identity<glm::mat4>(), glm::vec3(0.1f))};
+                        right_hand_orientation.y, right_hand_orientation.z)) *
+                    glm::scale(glm::identity<glm::mat4>(), glm::vec3(0.1f))};
 
   image->commandBuffer.pushConstants(pipeline_layout,
                                      vk::ShaderStageFlagBits::eVertex, 0,
@@ -894,9 +975,8 @@ auto render(const xr::Session session, Swapchain *swapchains[2],
             const xr::Space space, xr::Time predicted_display_type,
             const VkDevice device, const VkQueue queue,
             const VkRenderPass render_pass,
-            const VkPipelineLayout pipeline_layout, const VkPipeline pipeline)
-    -> bool {
-  auto frame = session.beginFrame({});
+            const VkPipelineLayout pipeline_layout, const VkPipeline pipeline) {
+  session.beginFrame({});
 
   XrViewState view_state{.type = XR_TYPE_VIEW_STATE};
 
@@ -935,25 +1015,23 @@ auto render(const xr::Session session, Swapchain *swapchains[2],
 }
 
 auto create_action_set(const xr::Instance instance, const char *name,
-                       const char *localized_name) -> xr::ActionSet {
+                       const char *localized_name) {
   return instance.createActionSet({name, localized_name, 0});
 }
 
 auto create_action(const xr::ActionSet action_set, const char *name,
-                   const char *localized_name, xr::ActionType type)
-    -> xr::Action {
+                   const char *localized_name, xr::ActionType type) {
   return action_set.createAction({name, type, 0, nullptr, localized_name});
 }
 
-auto create_action_space(const xr::Session session, const xr::Action action)
-    -> xr::Space {
+auto create_action_space(const xr::Session session, const xr::Action action) {
   return session.createActionSpace(
       {action, xr::Path::null(), {{0, 0, 0, 1}, {0, 0, 0}}});
 }
 
 auto suggest_bindings(const xr::Instance instance, xr::Action left_hand_action,
                       xr::Action right_hand_action, xr::Action left_grab_action,
-                      xr::Action right_grab_action) -> void {
+                      xr::Action right_grab_action) {
   const auto left_hand_path =
       instance.stringToPath("/user/hand/left/input/grip/pose");
   const auto right_hand_path =
@@ -977,22 +1055,20 @@ auto suggest_bindings(const xr::Instance instance, xr::Action left_hand_action,
                                               suggested_bindings});
 }
 
-auto attach_action_set(const xr::Session session, xr::ActionSet action_set)
-    -> void {
+auto attach_action_set(const xr::Session session, xr::ActionSet action_set) {
   session.attachSessionActionSets({1, &action_set});
 }
 
-auto get_action_boolean(const xr::Session session, const xr::Action action)
-    -> bool {
+auto get_action_boolean(const xr::Session session, const xr::Action action) {
   return session.getActionStateBoolean({action, xr::Path::null()})
              .currentState == true;
 }
 
 auto get_action_pose(const xr::Session session, const xr::Action action,
                      const xr::Space space, const xr::Space room_space,
-                     const xr::Time predicted_display_time) -> xr::Posef {
+                     const xr::Time predicted_display_time) {
   if (!session.getActionStatePose({action, xr::Path::null()}).isActive)
-    return {};
+    return xr::Posef{};
   return space.locateSpace(room_space, predicted_display_time).pose;
 }
 
@@ -1002,7 +1078,7 @@ auto input(const xr::Session session, const xr::ActionSet action_set,
            const xr::Action right_hand_action,
            const xr::Action left_grab_action,
            const xr::Action right_grab_action, const xr::Space left_hand_space,
-           const xr::Space right_hand_space) -> bool {
+           const xr::Space right_hand_space) {
   xr::ActiveActionSet active_action_set = {action_set, xr::Path::null()};
 
   if (const auto sync_result = session.syncActions({1, &active_action_set});
@@ -1059,19 +1135,6 @@ auto input(const xr::Session session, const xr::ActionSet action_set,
   return true;
 }
 
-uint32_t find_memory_type(const vk::PhysicalDevice device,
-                          const uint32_t type_filter,
-                          const vk::MemoryPropertyFlags properties) {
-  const auto mem_properties = device.getMemoryProperties();
-
-  for (uint32_t i = 0; i < mem_properties.memoryTypeCount; i++)
-    if (type_filter & (1 << i) && (mem_properties.memoryTypes[i].propertyFlags &
-                                   properties) == properties)
-      return i;
-
-  throw std::runtime_error("Failed to find suitable memory type!");
-}
-
 int main(int, char **) {
 #if defined _DEBUG
   spdlog::set_level(spdlog::level::trace);
@@ -1095,7 +1158,7 @@ int main(int, char **) {
   auto [device, queue] = create_device(
       physicalDevice, graphics_queue_family_index, deviceExtensions);
 
-  const auto render_pass = create_render_pass(device);
+  const auto render_pass = create_render_pass(device, physicalDevice);
   const auto command_pool =
       create_command_pool(device, graphics_queue_family_index);
   const auto descriptor_pool = create_descriptor_pool(device);

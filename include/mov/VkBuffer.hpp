@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mov/Vertex.hpp>
+
 #include <vulkan/vulkan.hpp>
 
 namespace mov {
@@ -16,33 +17,34 @@ public:
   VkBuffer(const VkBuffer &other) {
     this->buffer = other.buffer;
     this->memory = other.memory;
-    this->device = other.device;
+    this->device_ = other.device_;
   }
 
-  VkBuffer(VkBuffer &&other) {
+  VkBuffer(VkBuffer &&other) noexcept
+  {
     this->buffer = other.buffer;
     this->memory = other.memory;
-    this->device = other.device;
+    this->device_ = other.device_;
   }
 
   VkBuffer &operator=(const VkBuffer &other) {
     this->buffer = other.buffer;
     this->memory = other.memory;
-    this->device = other.device;
+    this->device_ = other.device_;
 
     return *this;
   }
 
-  auto destroy() const {
-    device.freeMemory(memory);
-    device.destroyBuffer(buffer);
+  [[nodiscard]] auto destroy() const {
+    device_.freeMemory(memory);
+    device_.destroyBuffer(buffer);
   }
 
   vk::Buffer buffer;
   vk::DeviceMemory memory;
 
 private:
-  vk::Device device;
+  vk::Device device_;
 };
 
 extern template VkBuffer<Vertex>;

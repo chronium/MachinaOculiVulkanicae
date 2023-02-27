@@ -1,7 +1,9 @@
 #pragma once
 
-#include <vulkan/vulkan.hpp>
 #include <glm/glm.hpp>
+#include <vulkan/vulkan.hpp>
+
+namespace mov {
 
 struct Vertex {
   glm::vec3 pos;
@@ -29,3 +31,4 @@ struct Vertex {
   }
 };
 
+}; // namespace mov

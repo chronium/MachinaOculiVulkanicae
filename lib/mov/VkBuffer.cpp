@@ -1,20 +1,9 @@
-#include <iostream>
 #include <mov/VkBuffer.hpp>
+#include <mov/VkUtils.hpp>
+
 #include <vulkan/vulkan.hpp>
 
 namespace mov {
-uint32_t find_memory_type(const vk::PhysicalDevice device,
-                          const uint32_t type_filter,
-                          const vk::MemoryPropertyFlags properties) {
-  const auto mem_properties = device.getMemoryProperties();
-
-  for (uint32_t i = 0; i < mem_properties.memoryTypeCount; i++)
-    if (type_filter & (1 << i) && (mem_properties.memoryTypes[i].propertyFlags &
-                                   properties) == properties)
-      return i;
-
-  throw std::runtime_error("Failed to find suitable memory type!");
-}
 
 auto create_buffer(const vk::Device device,
                    const vk::PhysicalDevice physical_device,
@@ -39,8 +28,7 @@ auto create_buffer(const vk::Device device,
 
 auto copy_buffer(const vk::Device device, const vk::CommandPool command_pool,
                  const vk::Queue graphics_queue, const vk::Buffer src_buffer,
-                 const vk::Buffer dst_buffer, const vk::DeviceSize size)
-    -> void {
+                 const vk::Buffer dst_buffer, const vk::DeviceSize size) {
   const auto command_buffer = device.allocateCommandBuffers(
       vk::CommandBufferAllocateInfo()
           .setLevel(vk::CommandBufferLevel::ePrimary)
@@ -98,7 +86,7 @@ VkBuffer<Vertex>::VkBuffer(const vk::Device device,
                            const vk::Queue queue,
                            const vk::BufferUsageFlags usage, const Vertex *data,
                            const std::size_t count)
-    : device(device) {
+    : device_(device) {
   auto [dst_buffer, dst_memory] = create_buffer(
       device, physical_device, command_pool, queue, usage, data, count);
 
@@ -112,7 +100,7 @@ VkBuffer<uint16_t>::VkBuffer(const vk::Device device,
                              const vk::Queue queue,
                              const vk::BufferUsageFlags usage,
                              const uint16_t *data, const std::size_t count)
-    : device(device) {
+    : device_(device) {
   auto [dst_buffer, dst_memory] = create_buffer(
       device, physical_device, command_pool, queue, usage, data, count);
 
