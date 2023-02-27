@@ -29,4 +29,5 @@ set(CODEGEN_FOLDER ${CMAKE_CURRENT_BINARY_DIR}/codegen)
 add_subdirectory(include)
 add_subdirectory(apps)
 add_subdirectory(data)
+add_subdirectory(lib)
 

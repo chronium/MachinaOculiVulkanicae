@@ -16,3 +16,4 @@
 #
 
 add_subdirectory(openxr)
+add_subdirectory(mov)
