@@ -4,6 +4,10 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
 #pragma warning(push, 0)
 #include <openxr/openxr.hpp>
 #pragma warning(pop)
@@ -20,6 +24,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <mov/Model.hpp>
 #include <mov/VkBuffer.hpp>
 
 #include "mov/VkImage.hpp"
@@ -85,8 +90,8 @@ static XrVector3f objectPos = {0, 0, 0};
 static XrVector3f right_hand_pos{0, 0, 0};
 static XrQuaternionf right_hand_orientation{0, 0, 0, 1};
 
-static mov::VkBuffer<mov::Vertex> vertex_buffer;
-static mov::VkBuffer<uint16_t> index_buffer;
+static mov::Model model;
+static mov::Model controller;
 
 void onInterrupt(int) { quit = true; }
 
@@ -100,7 +105,7 @@ const std::vector<mov::Vertex> vertices = {
     {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},
     {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}}};
 
-const std::vector<uint16_t> indices = {0, 1, 2, 2, 3, 0};
+const std::vector<uint32_t> indices = {0, 1, 2, 2, 3, 0};
 
 struct Swapchain {
   Swapchain(xr::Swapchain swapchain, vk::Format format, uint32_t width,
@@ -577,11 +582,11 @@ auto create_render_pass(const vk::Device device,
 
   vk::SubpassDependency dependency{};
   dependency.setSrcSubpass(VK_SUBPASS_EXTERNAL)
-  .setDstSubpass(0)
-  .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
-  .setSrcAccessMask(vk::AccessFlagBits::eNone)
-  .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
-  .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite);
+      .setDstSubpass(0)
+      .setSrcStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+      .setSrcAccessMask(vk::AccessFlagBits::eNone)
+      .setDstStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput)
+      .setDstAccessMask(vk::AccessFlagBits::eColorAttachmentWrite);
 
   vk::SubpassDependency depth_dependency{};
   depth_dependency.setSrcSubpass(VK_SUBPASS_EXTERNAL)
@@ -597,7 +602,9 @@ auto create_render_pass(const vk::Device device,
   vk::SubpassDependency dependencies[2] = {dependency, depth_dependency};
 
   vk::RenderPassCreateInfo create_info{};
-  create_info.setAttachments(attachments).setSubpasses(subpass).setDependencies(dependencies);
+  create_info.setAttachments(attachments)
+      .setSubpasses(subpass)
+      .setDependencies(dependencies);
 
   return device.createRenderPass(create_info, nullptr);
 }
@@ -648,10 +655,11 @@ auto create_shader(const vk::Device device, const std::string &path) {
   return device.createShaderModule(create_info);
 }
 
-auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
-                     vk::DescriptorSetLayout descriptor_set_layout,
-                     vk::ShaderModule vertex_shader,
-                     vk::ShaderModule fragment_shader)
+auto create_pipeline(const vk::Device device, const vk::RenderPass render_pass,
+                     const vk::DescriptorSetLayout descriptor_set_layout,
+                     const vk::ShaderModule vertex_shader,
+                     const vk::ShaderModule fragment_shader,
+                     const uint32_t width, const uint32_t height)
     -> std::tuple<vk::PipelineLayout, vk::Pipeline> {
   vk::PipelineLayoutCreateInfo layout_create_info{};
   layout_create_info.setSetLayouts(descriptor_set_layout)
@@ -679,8 +687,9 @@ auto create_pipeline(vk::Device device, vk::RenderPass render_pass,
       .setModule(vertex_shader)
       .setPName("main");
 
-  const vk::Viewport viewport = {0, 0, 1024, 1024, 0, 1};
-  constexpr vk::Rect2D scissor = {{0, 0}, {1024, 1024}};
+  const vk::Viewport viewport = {
+      0, 0, static_cast<float>(width), static_cast<float>(height), 0, 1};
+  const vk::Rect2D scissor = {{0, 0}, {width, height}};
 
   vk::PipelineViewportStateCreateInfo viewport_stage{};
   viewport_stage.setViewports(viewport).setScissors(scissor);
@@ -786,6 +795,23 @@ auto create_session(const xr::Instance instance, const xr::SystemId system_id,
   return instance.createSession(session_create_info);
 }
 
+auto get_resolution(const xr::Instance instance, const xr::SystemId system)
+    -> std::tuple<uint32_t, uint32_t> {
+  const std::vector<xr::ViewConfigurationView> config_views =
+      instance.enumerateViewConfigurationViewsToVector(
+          system, xr::ViewConfigurationType::PrimaryStereo);
+
+  uint32_t width = 0;
+  uint32_t height = 0;
+
+  for (const xr::ViewConfigurationView &view : config_views) {
+    width += view.recommendedImageRectWidth;
+    height = std::max(height, view.recommendedImageRectHeight);
+  }
+
+  return {width, height};
+}
+
 auto create_swapchains(const xr::Instance instance, const xr::SystemId system,
                        const xr::Session session)
     -> std::tuple<Swapchain *, Swapchain *> {
@@ -834,23 +860,13 @@ auto create_space(const xr::Session session,
   return session.createReferenceSpace({type, {{0, 0, 0, 1}, {0, 0, 0}}});
 }
 
-auto render_eye(Swapchain *swapchain,
-                const std::vector<SwapchainImage *> &images, xr::View view,
-                vk::Device device, vk::Queue queue, vk::RenderPass render_pass,
-                vk::PipelineLayout pipeline_layout, vk::Pipeline pipeline) {
-  uint32_t active_index;
+auto update_projection_view_matrix(const vk::Device device, const xr::View view,
+                                   const SwapchainImage *image) {
+  const auto data =
+      static_cast<float *>(device.mapMemory(image->memory, 0, ~0, {}));
 
-  swapchain->swapchain.acquireSwapchainImage({}, &active_index);
-
-  swapchain->swapchain.waitSwapchainImage(
-      {xr::Duration{std::numeric_limits<int64_t>::max()}});
-
-  const SwapchainImage *image = images[active_index];
-
-  auto data = static_cast<float *>(device.mapMemory(image->memory, 0, ~0, {}));
-
-  float angle_width = tan(view.fov.angleRight) - tan(view.fov.angleLeft);
-  float angle_height = tan(view.fov.angleDown) - tan(view.fov.angleUp);
+  const float angle_width = tan(view.fov.angleRight) - tan(view.fov.angleLeft);
+  const float angle_height = tan(view.fov.angleDown) - tan(view.fov.angleUp);
 
   float projection_matrix[4][4]{{0}};
 
@@ -874,6 +890,22 @@ auto render_eye(Swapchain *swapchain,
 
   memcpy(data, projection_matrix, sizeof(float) * 4 * 4);
   memcpy(4 * 4 + data, value_ptr(view_matrix), sizeof(float) * 4 * 4);
+}
+
+auto render_eye(Swapchain *swapchain,
+                const std::vector<SwapchainImage *> &images, xr::View view,
+                vk::Device device, vk::Queue queue, vk::RenderPass render_pass,
+                vk::PipelineLayout pipeline_layout, vk::Pipeline pipeline) {
+  uint32_t active_index;
+
+  swapchain->swapchain.acquireSwapchainImage({}, &active_index);
+
+  swapchain->swapchain.waitSwapchainImage(
+      {xr::Duration{std::numeric_limits<int64_t>::max()}});
+
+  const SwapchainImage *image = images[active_index];
+
+  update_projection_view_matrix(device, view, image);
 
   device.unmapMemory(image->memory);
 
@@ -918,13 +950,6 @@ auto render_eye(Swapchain *swapchain,
                                           pipeline_layout, 0, 1,
                                           &image->descriptorSet, 0, nullptr);
 
-  vk::Buffer vertex_buffers[] = {vertex_buffer.buffer};
-  vk::DeviceSize offsets[] = {0};
-
-  image->commandBuffer.bindVertexBuffers(0, 1, vertex_buffers, offsets);
-  image->commandBuffer.bindIndexBuffer(index_buffer.buffer, 0,
-                                       vk::IndexType::eUint16);
-
   auto constants = PushConstants{
       glm::translate(glm::identity<glm::mat4>(),
                      glm::vec3(objectPos.x, objectPos.y, objectPos.z))};
@@ -933,24 +958,23 @@ auto render_eye(Swapchain *swapchain,
                                      vk::ShaderStageFlagBits::eVertex, 0,
                                      sizeof PushConstants, &constants);
 
-  image->commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0,
-                                   0, 0);
+  model.draw(image->commandBuffer);
 
-  constants =
-      PushConstants{glm::translate(glm::identity<glm::mat4>(),
-                                   glm::vec3(right_hand_pos.x, right_hand_pos.y,
-                                             right_hand_pos.z)) *
-                    glm::mat4_cast(glm::quat(
-                        right_hand_orientation.w, right_hand_orientation.x,
-                        right_hand_orientation.y, right_hand_orientation.z)) *
-                    glm::scale(glm::identity<glm::mat4>(), glm::vec3(0.1f))};
+  constants = PushConstants{      glm::translate(
+          glm::identity<glm::mat4>(),
+          glm::vec3(right_hand_pos.x, right_hand_pos.y, right_hand_pos.z)) *
+      glm::mat4_cast(
+          glm::quat(right_hand_orientation.w, right_hand_orientation.x,
+                    right_hand_orientation.y, right_hand_orientation.z)) *
+      glm::rotate(glm::identity<glm::mat4>(), static_cast<float>(glm::radians(-20.6)), glm::vec3(1.f, 0.f, 0.f)) *
+      glm::translate(glm::identity<glm::mat4>(),
+                     -glm::vec3(-0.007, -0.00182941, 0.1019482))};
 
   image->commandBuffer.pushConstants(pipeline_layout,
                                      vk::ShaderStageFlagBits::eVertex, 0,
                                      sizeof PushConstants, &constants);
 
-  image->commandBuffer.drawIndexed(static_cast<uint32_t>(indices.size()), 1, 0,
-                                   0, 0);
+  controller.draw(image->commandBuffer);
 
   image->commandBuffer.endRenderPass();
   image->commandBuffer.end();
@@ -1135,6 +1159,96 @@ auto input(const xr::Session session, const xr::ActionSet action_set,
   return true;
 }
 
+std::string get_steam_install_location();
+
+auto process_mesh(mov::VkBufferProvider provider, aiMesh *mesh,
+                  const aiScene *scene) {
+  std::vector<mov::Vertex> vertices;
+  std::vector<unsigned int> indices;
+  // std::vector<mov::Texture> textures;
+
+  for (auto i = 0u; i < mesh->mNumVertices; ++i) {
+    mov::Vertex vertex;
+    glm::vec3 vector;
+
+    vector.x = mesh->mVertices[i].x;
+    vector.y = mesh->mVertices[i].y;
+    vector.z = mesh->mVertices[i].z;
+    vertex.pos = vector;
+
+    if (mesh->mTextureCoords[0]) {
+      glm::vec2 vec;
+      vec.x = mesh->mTextureCoords[0][i].x;
+      vec.y = mesh->mTextureCoords[0][i].y;
+      // vertex.tex_coords = vec;
+    } else {
+      // vertex.tex_coords = glm::vec2(0.0f, 0.0f);
+    }
+
+    vector.x = mesh->mNormals[i].x;
+    vector.y = mesh->mNormals[i].y;
+    vector.z = mesh->mNormals[i].z;
+    // vertex.normal = vector;
+
+    vertex.color = glm::vec3(1.0);
+
+    vertices.push_back(vertex);
+  }
+
+  for (auto i = 0u; i < mesh->mNumFaces; ++i) {
+    const auto face = mesh->mFaces[i];
+    for (auto j = 0u; j < face.mNumIndices; ++j)
+      indices.push_back(face.mIndices[j]);
+  }
+
+  /*if (mesh->mMaterialIndex >= 0)
+  {
+       const auto material = scene->mMaterials[mesh->mMaterialIndex];
+    std::vector<mov::Texture> diffuse_maps =
+        load_material_textures(material, aiTextureType_DIFFUSE,
+  "texture_diffuse"); textures.insert(textures.end(), diffuse_maps.begin(),
+  diffuse_maps.end()); std::vector<mov::Texture> specular_maps =
+        load_material_textures(material, aiTextureType_SPECULAR,
+  "texture_specular"); textures.insert(textures.end(), specular_maps.begin(),
+  specular_maps.end());
+  }*/
+
+  return mov::Model(provider, vertices, indices /*, textures*/);
+}
+
+auto process_node(mov::VkBufferProvider provider, aiNode *node,
+                  const aiScene *scene) -> std::vector<mov::Model> {
+  std::vector<mov::Model> meshes;
+
+  for (auto i = 0u; i < node->mNumMeshes; ++i) {
+    const auto mesh = scene->mMeshes[node->mMeshes[i]];
+    meshes.push_back(process_mesh(provider, mesh, scene));
+  }
+
+  for (auto i = 0u; i < node->mNumChildren; ++i) {
+    const auto child_meshes = process_node(provider, node->mChildren[i], scene);
+    meshes.insert(meshes.end(), child_meshes.begin(), child_meshes.end());
+  }
+
+  return meshes;
+}
+
+auto load_model(mov::VkBufferProvider provider, std::string path) {
+  Assimp::Importer importer;
+
+  const auto flags = aiProcess_Triangulate | aiProcess_GenSmoothNormals |
+                     aiProcess_JoinIdenticalVertices | aiProcess_SortByPType;
+
+  const auto scene = importer.ReadFile(path, flags);
+  if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE ||
+      !scene->mRootNode) {
+    spdlog::error("Failed to load model: {}", importer.GetErrorString());
+    return std::vector<mov::Model>{};
+  }
+
+  return process_node(provider, scene->mRootNode, scene);
+}
+
 int main(int, char **) {
 #if defined _DEBUG
   spdlog::set_level(spdlog::level::trace);
@@ -1165,17 +1279,25 @@ int main(int, char **) {
   const auto descriptor_set_layout = create_descriptor_set_layout(device);
   const auto vertex_shader = create_shader(device, "data\\vertex.vert.spv");
   const auto fragment_shader = create_shader(device, "data\\fragment.frag.spv");
+
+  const auto [width, height] = get_resolution(instance, system);
+
   auto [pipelineLayout, pipeline] =
       create_pipeline(device, render_pass, descriptor_set_layout, vertex_shader,
-                      fragment_shader);
+                      fragment_shader, width, height);
 
-  vertex_buffer = mov::VkBuffer(device, physicalDevice, command_pool, queue,
-                                vk::BufferUsageFlagBits::eVertexBuffer,
-                                vertices.data(), vertices.size());
+  spdlog::info("Found Steam: {}", get_steam_install_location());
 
-  index_buffer = mov::VkBuffer(device, physicalDevice, command_pool, queue,
-                               vk::BufferUsageFlagBits::eIndexBuffer,
-                               indices.data(), indices.size());
+  auto provider =
+      mov::VkBufferProvider(device, physicalDevice, command_pool, queue);
+
+  controller = load_model(
+      provider,
+      get_steam_install_location() +
+          "/steamapps/common/SteamVR/resources/rendermodels/"
+          "oculus_quest2_controller_right/oculus_quest2_controller_right.obj")
+      [0];
+  model = mov::Model(provider, vertices, indices);
 
   auto session =
       create_session(instance, system, vulkan_instance, physicalDevice, device,
@@ -1342,8 +1464,7 @@ int main(int, char **) {
 
   session.destroy();
 
-  index_buffer.destroy();
-  vertex_buffer.destroy();
+  model.destroy();
 
   device.destroyPipeline(pipeline);
   device.destroyPipelineLayout(pipelineLayout);
@@ -1363,4 +1484,25 @@ int main(int, char **) {
   instance.destroy();
 
   return 0;
+}
+
+#include <Windows.h>
+
+std::string get_steam_install_location() {
+  HKEY hKey;
+  LONG lRes = RegOpenKeyEx(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0,
+                           KEY_READ, &hKey);
+  if (lRes != ERROR_SUCCESS) {
+    return "";
+  }
+
+  char szSteamPath[MAX_PATH];
+  DWORD dwSteamPathSize = sizeof(szSteamPath);
+  lRes = RegQueryValueEx(hKey, "SteamPath", NULL, NULL, (LPBYTE)szSteamPath,
+                         &dwSteamPathSize);
+  if (lRes != ERROR_SUCCESS) {
+    return "";
+  }
+
+  return szSteamPath;
 }

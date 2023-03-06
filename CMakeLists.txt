@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 
 find_package(Vulkan REQUIRED glslc glslang)
+find_package(assimp CONFIG REQUIRED)
 
 FetchContent_Declare(
 	spdlog

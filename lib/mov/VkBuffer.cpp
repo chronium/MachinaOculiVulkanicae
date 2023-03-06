@@ -5,104 +5,100 @@
 
 namespace mov {
 
-auto create_buffer(const vk::Device device,
-                   const vk::PhysicalDevice physical_device,
-                   const vk::DeviceSize size, const vk::BufferUsageFlags usage,
-                   const vk::MemoryPropertyFlags properties)
+auto VkBufferProvider::create_buffer(
+    const vk::DeviceSize size, const vk::BufferUsageFlags usage,
+    const vk::MemoryPropertyFlags properties) const
     -> std::tuple<vk::Buffer, vk::DeviceMemory> {
-  const auto buffer = device.createBuffer(
+  const auto buffer = device_.createBuffer(
       vk::BufferCreateInfo().setSize(size).setUsage(usage).setSharingMode(
           vk::SharingMode::eExclusive));
 
-  const auto requirements = device.getBufferMemoryRequirements(buffer);
+  const auto requirements = device_.getBufferMemoryRequirements(buffer);
 
-  const auto memory = device.allocateMemory(
+  const auto memory = device_.allocateMemory(
       vk::MemoryAllocateInfo()
           .setAllocationSize(requirements.size)
           .setMemoryTypeIndex(find_memory_type(
-              physical_device, requirements.memoryTypeBits, properties)));
-  device.bindBufferMemory(buffer, memory, 0);
+              physical_device_, requirements.memoryTypeBits, properties)));
+  device_.bindBufferMemory(buffer, memory, 0);
 
   return {buffer, memory};
 }
 
-auto copy_buffer(const vk::Device device, const vk::CommandPool command_pool,
-                 const vk::Queue graphics_queue, const vk::Buffer src_buffer,
-                 const vk::Buffer dst_buffer, const vk::DeviceSize size) {
-  const auto command_buffer = device.allocateCommandBuffers(
+auto VkBufferProvider::copy_buffer(const vk::Buffer src, const vk::Buffer dst,
+                                   const vk::DeviceSize size) const {
+  const auto command_buffer = device_.allocateCommandBuffers(
       vk::CommandBufferAllocateInfo()
           .setLevel(vk::CommandBufferLevel::ePrimary)
-          .setCommandPool(command_pool)
+          .setCommandPool(command_pool_)
           .setCommandBufferCount(1))[0];
 
   command_buffer.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
   vk::BufferCopy copy_region{};
   copy_region.setSrcOffset(0).setDstOffset(0).setSize(size);
-  command_buffer.copyBuffer(src_buffer, dst_buffer, copy_region);
+  command_buffer.copyBuffer(src, dst, copy_region);
 
   command_buffer.end();
 
-  graphics_queue.submit(vk::SubmitInfo().setCommandBuffers(command_buffer));
-  graphics_queue.waitIdle();
+  queue_.submit(vk::SubmitInfo().setCommandBuffers(command_buffer));
+  queue_.waitIdle();
 
-  device.freeCommandBuffers(command_pool, command_buffer);
+  device_.freeCommandBuffers(command_pool_, command_buffer);
 }
 
 template <typename T>
-auto create_buffer(const vk::Device device,
-                   const vk::PhysicalDevice physical_device,
-                   const vk::CommandPool command_pool, const vk::Queue queue,
+auto create_buffer(const VkBufferProvider provider,
                    const vk::BufferUsageFlags usage, const T *data,
                    const std::size_t count)
     -> std::tuple<vk::Buffer, vk::DeviceMemory> {
   const vk::DeviceSize buffer_size = sizeof data[0] * count;
 
   const auto [staging_buffer, staging_memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferSrc,
-                    vk::MemoryPropertyFlagBits::eHostVisible |
-                        vk::MemoryPropertyFlagBits::eHostCoherent);
+      provider.create_buffer(buffer_size, vk::BufferUsageFlagBits::eTransferSrc,
+                             vk::MemoryPropertyFlagBits::eHostVisible |
+                                 vk::MemoryPropertyFlagBits::eHostCoherent);
 
-  const auto dest = device.mapMemory(staging_memory, 0, buffer_size);
+  const auto dest = device(provider).mapMemory(staging_memory, 0, buffer_size);
   memcpy_s(dest, buffer_size, data, buffer_size);
-  device.unmapMemory(staging_memory);
+  device(provider).unmapMemory(staging_memory);
 
-  const auto [buffer, memory] =
-      create_buffer(device, physical_device, buffer_size,
-                    vk::BufferUsageFlagBits::eTransferDst | usage,
-                    vk::MemoryPropertyFlagBits::eDeviceLocal);
-  copy_buffer(device, command_pool, queue, staging_buffer, buffer, buffer_size);
+  const auto [buffer, memory] = provider.create_buffer(
+      buffer_size, vk::BufferUsageFlagBits::eTransferDst | usage,
+      vk::MemoryPropertyFlagBits::eDeviceLocal);
+  provider.copy_buffer(staging_buffer, buffer, buffer_size);
 
-  device.destroyBuffer(staging_buffer);
-  device.freeMemory(staging_memory);
+  device(provider).destroyBuffer(staging_buffer);
+  device(provider).freeMemory(staging_memory);
 
   return {buffer, memory};
 }
 
-VkBuffer<Vertex>::VkBuffer(const vk::Device device,
-                           const vk::PhysicalDevice physical_device,
-                           const vk::CommandPool command_pool,
-                           const vk::Queue queue,
+VkBuffer<Vertex>::VkBuffer(const VkBufferProvider provider,
                            const vk::BufferUsageFlags usage, const Vertex *data,
                            const std::size_t count)
-    : device_(device) {
-  auto [dst_buffer, dst_memory] = create_buffer(
-      device, physical_device, command_pool, queue, usage, data, count);
+    : provider_(provider) {
+  auto [dst_buffer, dst_memory] = create_buffer(provider, usage, data, count);
 
   buffer = dst_buffer;
   memory = dst_memory;
 }
 
-VkBuffer<uint16_t>::VkBuffer(const vk::Device device,
-                             const vk::PhysicalDevice physical_device,
-                             const vk::CommandPool command_pool,
-                             const vk::Queue queue,
+VkBuffer<uint16_t>::VkBuffer(const VkBufferProvider provider,
                              const vk::BufferUsageFlags usage,
                              const uint16_t *data, const std::size_t count)
-    : device_(device) {
-  auto [dst_buffer, dst_memory] = create_buffer(
-      device, physical_device, command_pool, queue, usage, data, count);
+    : provider_(provider) {
+  auto [dst_buffer, dst_memory] = create_buffer(provider, usage, data, count);
+
+  buffer = dst_buffer;
+  memory = dst_memory;
+}
+
+VkBuffer<uint32_t>::VkBuffer(const VkBufferProvider provider,
+                             const vk::BufferUsageFlags usage,
+                             const uint32_t *data, const std::size_t count)
+    : provider_(provider) {
+  auto [dst_buffer, dst_memory] = create_buffer(provider, usage, data, count);
 
   buffer = dst_buffer;
   memory = dst_memory;
