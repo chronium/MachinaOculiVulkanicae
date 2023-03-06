@@ -24,10 +24,12 @@
 
 #include <spdlog/spdlog.h>
 
-#include <mov/Model.hpp>
+#include <mov/GameObject.hpp>
+#include <mov/Mesh.hpp>
 #include <mov/VkBuffer.hpp>
+#include <mov/VkImage.hpp>
 
-#include "mov/VkImage.hpp"
+#include "core/Controller.hpp"
 
 const std::map<XrDebugUtilsMessageTypeFlagsEXT, std::string> xrMessageTypeMap =
     {
@@ -90,8 +92,8 @@ static XrVector3f objectPos = {0, 0, 0};
 static XrVector3f right_hand_pos{0, 0, 0};
 static XrQuaternionf right_hand_orientation{0, 0, 0, 1};
 
-static mov::Model model;
-static mov::Model controller;
+static mov::GameObject object;
+static mov::core::Controller controller;
 
 void onInterrupt(int) { quit = true; }
 
@@ -950,31 +952,15 @@ auto render_eye(Swapchain *swapchain,
                                           pipeline_layout, 0, 1,
                                           &image->descriptorSet, 0, nullptr);
 
-  auto constants = PushConstants{
-      glm::translate(glm::identity<glm::mat4>(),
-                     glm::vec3(objectPos.x, objectPos.y, objectPos.z))};
+  object.transform.move_abs(glm::vec3(objectPos.x, objectPos.y, objectPos.z));
+  object.draw(image->commandBuffer, pipeline_layout);
 
-  image->commandBuffer.pushConstants(pipeline_layout,
-                                     vk::ShaderStageFlagBits::eVertex, 0,
-                                     sizeof PushConstants, &constants);
-
-  model.draw(image->commandBuffer);
-
-  constants = PushConstants{      glm::translate(
-          glm::identity<glm::mat4>(),
-          glm::vec3(right_hand_pos.x, right_hand_pos.y, right_hand_pos.z)) *
-      glm::mat4_cast(
-          glm::quat(right_hand_orientation.w, right_hand_orientation.x,
-                    right_hand_orientation.y, right_hand_orientation.z)) *
-      glm::rotate(glm::identity<glm::mat4>(), static_cast<float>(glm::radians(-20.6)), glm::vec3(1.f, 0.f, 0.f)) *
-      glm::translate(glm::identity<glm::mat4>(),
-                     -glm::vec3(-0.007, -0.00182941, 0.1019482))};
-
-  image->commandBuffer.pushConstants(pipeline_layout,
-                                     vk::ShaderStageFlagBits::eVertex, 0,
-                                     sizeof PushConstants, &constants);
-
-  controller.draw(image->commandBuffer);
+  controller.transform
+      .move_abs(glm::vec3(right_hand_pos.x, right_hand_pos.y, right_hand_pos.z))
+      .rotate_abs(glm::quat(right_hand_orientation.w, right_hand_orientation.x,
+                            right_hand_orientation.y,
+                            right_hand_orientation.z));
+  controller.draw(image->commandBuffer, pipeline_layout);
 
   image->commandBuffer.endRenderPass();
   image->commandBuffer.end();
@@ -1213,12 +1199,12 @@ auto process_mesh(mov::VkBufferProvider provider, aiMesh *mesh,
   specular_maps.end());
   }*/
 
-  return mov::Model(provider, vertices, indices /*, textures*/);
+  return mov::Mesh(provider, vertices, indices /*, textures*/);
 }
 
 auto process_node(mov::VkBufferProvider provider, aiNode *node,
-                  const aiScene *scene) -> std::vector<mov::Model> {
-  std::vector<mov::Model> meshes;
+                  const aiScene *scene) -> std::vector<mov::Mesh> {
+  std::vector<mov::Mesh> meshes;
 
   for (auto i = 0u; i < node->mNumMeshes; ++i) {
     const auto mesh = scene->mMeshes[node->mMeshes[i]];
@@ -1243,7 +1229,7 @@ auto load_model(mov::VkBufferProvider provider, std::string path) {
   if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE ||
       !scene->mRootNode) {
     spdlog::error("Failed to load model: {}", importer.GetErrorString());
-    return std::vector<mov::Model>{};
+    return std::vector<mov::Mesh>{};
   }
 
   return process_node(provider, scene->mRootNode, scene);
@@ -1297,7 +1283,7 @@ int main(int, char **) {
           "/steamapps/common/SteamVR/resources/rendermodels/"
           "oculus_quest2_controller_right/oculus_quest2_controller_right.obj")
       [0];
-  model = mov::Model(provider, vertices, indices);
+  object = mov::Mesh(provider, vertices, indices);
 
   auto session =
       create_session(instance, system, vulkan_instance, physicalDevice, device,
@@ -1464,7 +1450,7 @@ int main(int, char **) {
 
   session.destroy();
 
-  model.destroy();
+  object.destroy();
 
   device.destroyPipeline(pipeline);
   device.destroyPipelineLayout(pipelineLayout);

@@ -9,11 +9,11 @@
 
 namespace mov {
 
-class Model {
+class Mesh {
 public:
-  Model() = default;
+  Mesh() = default;
 
-  Model(const mov::VkBufferProvider provider,
+  Mesh(const mov::VkBufferProvider provider,
         const std::vector<Vertex> &vertices,
         const std::vector<uint32_t> &indices)
       : vertices_(provider, vk::BufferUsageFlagBits::eVertexBuffer,
@@ -22,27 +22,21 @@ public:
                  indices.data(), indices.size()),
         index_count_(static_cast<uint32_t>(indices.size())) {}
 
-  Model(const mov::Model &other) {
+  Mesh(const mov::Mesh &other) {
     this->vertices_ = other.vertices_;
     this->indices_ = other.indices_;
     this->index_count_ = other.index_count_;
   }
 
-  Model &operator=(Model &&other) noexcept {
-    this->vertices_ = other.vertices_;
-    this->indices_ = other.indices_;
-    this->index_count_ = other.index_count_;
-
-    return *this;
-  }
-
-  Model &operator=(const Model &other) {
+  Mesh &operator=(Mesh &&other) noexcept {
     this->vertices_ = other.vertices_;
     this->indices_ = other.indices_;
     this->index_count_ = other.index_count_;
 
     return *this;
   }
+
+  Mesh &operator=(const Mesh &other) = default;
 
   auto draw(const vk::CommandBuffer command_buffer) const {
     constexpr vk::DeviceSize offsets[] = {0};

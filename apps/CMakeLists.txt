@@ -1,6 +1,6 @@
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-add_executable(core core.main.cpp)
+add_executable(core "core.main.cpp" "core/Controller.hpp" "core/Controller.cpp")
 add_dependencies(core shaders generate_openxr_header)
 
 target_include_directories(core PRIVATE Vulkan::Headers ${openxr_SOURCE_DIR}/include spdlog::spdlog ${CMAKE_SOURCE_DIR}/include)
